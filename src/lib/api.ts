@@ -86,6 +86,8 @@ export const api = {
     invoke<AutomationState>("open_automation", { platform, url, bounds }),
   verifyPlatformLogin: (platform: string) =>
     invoke<PlatformLoginResult>("verify_platform_login", { platform }),
+  checkPlatformHandle: (platform: string, handle: string) =>
+    invoke<string>("check_platform_handle", { platform, handle }),
   setAutomationBounds: (platform: string, bounds: AutomationBounds) =>
     invoke<void>("set_automation_bounds", { platform, bounds }),
   setAutomationVisible: (platform: string, visible: boolean) =>

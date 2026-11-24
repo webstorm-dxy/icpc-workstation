@@ -105,6 +105,7 @@ pub fn run() {
             commands::save_platform_account,
             commands::open_platform_login,
             commands::open_automation,
+            commands::check_platform_handle,
             commands::verify_platform_login,
             commands::set_automation_bounds,
             commands::set_automation_visible,

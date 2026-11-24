@@ -1220,6 +1220,35 @@ fn canonical_tag(tag: &str) -> String {
         .collect()
 }
 
+pub async fn check_handle(platform: &str, handle: &str) -> AppResult<String> {
+    let handle = handle.trim();
+    if handle.is_empty() {
+        return Err(AppError::invalid("请先填写 handle"));
+    }
+    match platform {
+        "codeforces" => {
+            let client = http_client().await?;
+            let value = cf_api(&client, &format!("user.info?handles={handle}")).await?;
+            let user = value
+                .get("result")
+                .and_then(|v| v.as_array())
+                .and_then(|items| items.first());
+            let actual = user
+                .and_then(|u| u.get("handle"))
+                .and_then(|v| v.as_str())
+                .unwrap_or(handle);
+            let rating = user
+                .and_then(|u| u.get("rating"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            Ok(format!("handle 有效：{actual}，当前 rating {rating}"))
+        }
+        _ => Err(AppError::invalid(
+            "该校验目前只支持 Codeforces；请使用登录验证",
+        )),
+    }
+}
+
 pub async fn verify_login(
     app: &AppHandle,
     db: &Db,
@@ -1231,6 +1260,23 @@ pub async fn verify_login(
         .await?;
     automation.wait_ready(platform, 25_000).await?;
     tokio::time::sleep(Duration::from_millis(800)).await;
+    let challenge = automation
+        .eval_json(platform, challenge_probe(), 5_000)
+        .await?;
+    if challenge.get("challenge").and_then(|v| v.as_bool()) == Some(true) {
+        let hint = if platform == "codeforces" {
+            "Codeforces 数据同步不需要登录：请关闭面板，在设置中填写 handle 后直接点“同步”。自动提交可能被 Cloudflare 拦截；可在系统浏览器手动提交后，用“手动录入提交结果”记录。"
+        } else {
+            "请在右侧页面完成人机验证后重试。"
+        };
+        automation
+            .needs_human(app, platform, "页面触发了 Cloudflare/人机验证", hint)
+            .await;
+        return Err(AppError::needs_human(
+            "页面触发了 Cloudflare/人机验证",
+            hint,
+        ));
+    }
     let probe = automation
         .eval_json(platform, login_probe(platform), 8_000)
         .await?;

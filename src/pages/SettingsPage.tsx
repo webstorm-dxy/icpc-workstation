@@ -162,6 +162,7 @@ function PlatformCard({ platform }: { platform: Platform }) {
   const sync = useAppStore((s) => s.sync);
   const [handle, setHandle] = useState(platform.handle ?? "");
   const [saving, setSaving] = useState(false);
+  const [checking, setChecking] = useState(false);
 
   useEffect(() => {
     setHandle(platform.handle ?? "");
@@ -191,6 +192,38 @@ function PlatformCard({ platform }: { platform: Platform }) {
     }
   };
 
+  const checkHandle = async () => {
+    if (!handle.trim()) {
+      message.warning("请先填写 handle");
+      return;
+    }
+    setChecking(true);
+    try {
+      const text = await api.checkPlatformHandle(platform.id, handle.trim());
+      message.success(text);
+    } catch (error) {
+      message.error(errText(error));
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const syncNow = async () => {
+    if (platform.id !== "luogu" && !handle.trim()) {
+      message.warning(`请先填写 ${platform.handleLabel}`);
+      return;
+    }
+    try {
+      if (handle.trim() !== (platform.handle ?? "")) {
+        await api.savePlatformAccount(platform.id, handle.trim());
+        await queryClient.invalidateQueries({ queryKey: ["platforms"] });
+      }
+      await api.startSync(platform.id);
+    } catch (error) {
+      message.error(errText(error));
+    }
+  };
+
   return (
     <Card
       size="small"
@@ -199,8 +232,10 @@ function PlatformCard({ platform }: { platform: Platform }) {
           <span>{platform.name}</span>
           {platform.loggedIn ? (
             <Tag color="green">已登录</Tag>
+          ) : platform.handle ? (
+            <Tag color="blue">handle 已保存</Tag>
           ) : (
-            <Tag>未验证</Tag>
+            <Tag>未填写</Tag>
           )}
         </Space>
       }
@@ -209,7 +244,7 @@ function PlatformCard({ platform }: { platform: Platform }) {
           size="small"
           icon={<CloudSyncOutlined />}
           loading={sync[platform.id]?.status === "running"}
-          onClick={() => api.startSync(platform.id).catch((error) => message.error(errText(error)))}
+          onClick={syncNow}
         >
           同步
         </Button>
@@ -217,6 +252,11 @@ function PlatformCard({ platform }: { platform: Platform }) {
     >
       <Space orientation="vertical" style={{ width: "100%" }} size={8}>
         <div className="muted tiny">{platform.description}</div>
+        <span className="muted tiny">
+          {platform.id === "luogu"
+            ? "洛谷同步需要登录；遇到人机验证时在右侧页面完成，然后点“验证登录 / 继续”。"
+            : "同步只使用公开 API：填写 handle 后直接点“同步”，不需要登录。登录仅用于自动提交；Cloudflare 可能拦截内置浏览器，提交失败时可用手动录入。"}
+        </span>
         <Space.Compact style={{ width: "100%" }}>
           <Input
             style={{ flex: 1 }}
@@ -234,11 +274,17 @@ function PlatformCard({ platform }: { platform: Platform }) {
             icon={<LoginOutlined />}
             onClick={() => requestAutomation(platform.id, platform.loginUrl)}
           >
-            打开登录页
+            {platform.id === "codeforces" ? "自动提交登录" : "打开登录页"}
           </Button>
-          <Button size="small" onClick={verify}>
-            验证登录
-          </Button>
+          {platform.id === "codeforces" ? (
+            <Button size="small" loading={checking} onClick={checkHandle}>
+              校验 handle
+            </Button>
+          ) : (
+            <Button size="small" onClick={verify}>
+              验证登录
+            </Button>
+          )}
         </Space>
         {sync[platform.id] ? (
           <div>

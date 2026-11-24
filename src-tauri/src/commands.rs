@@ -549,6 +549,12 @@ pub async fn open_automation(
 }
 
 #[tauri::command]
+pub async fn check_platform_handle(platform: String, handle: String) -> AppResult<String> {
+    known_platform(&platform)?;
+    platforms::check_handle(&platform, &handle).await
+}
+
+#[tauri::command]
 pub async fn verify_platform_login(
     app: AppHandle,
     state: State<'_, SharedState>,
