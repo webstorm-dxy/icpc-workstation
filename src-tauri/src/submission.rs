@@ -847,17 +847,11 @@ async fn poll_luogu(
     let value = automation
         .fetch_json_in_page(
             "luogu",
-            &format!("/record/list?user_id={uid}&page=1&_contentOnly=1"),
+            &format!("/record/list?user={uid}&user_id={uid}&page=1&_contentOnly=1"),
             25_000,
         )
         .await?;
-    let records = value
-        .get("body")
-        .and_then(|b| b.get("currentData"))
-        .and_then(|d| d.get("records"))
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
+    let records = crate::platforms::luogu_record_items(&value);
     for record in records {
         let pid = record
             .get("problem")

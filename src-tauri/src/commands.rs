@@ -630,6 +630,16 @@ pub async fn start_sync(
         .await;
         match result {
             Ok(()) => {
+                // A sync can backfill dozens of historical submissions. Refresh
+                // the plan so already-attempted problems drop out of the
+                // recommendation instead of waiting for the next submission.
+                crate::plan::spawn_refresh(
+                    app_task.clone(),
+                    state_task.db.clone(),
+                    state_task.llm.clone(),
+                    None,
+                    None,
+                );
                 let _ = app_task.emit(
                     "sync://progress",
                     SyncProgressDto {

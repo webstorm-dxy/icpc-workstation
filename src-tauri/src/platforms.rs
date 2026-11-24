@@ -736,6 +736,35 @@ async fn sync_atcoder(app: &AppHandle, db: &Db, account: Option<Account>) -> App
     Ok(())
 }
 
+/// Luogu returns `currentData.records` as a `List<RecordBase>` object
+/// (`{ result: RecordBase[], count, perPage }`), not as a bare array. Older
+/// pages and the web UI sometimes expose the rows directly, so accept both
+/// shapes plus the object-map form used when `result` is keyed by index.
+pub(crate) fn luogu_list_items(value: &Value, key: &str) -> Vec<Value> {
+    let body = value.get("body").unwrap_or(value);
+    let list = body
+        .get("currentData")
+        .and_then(|data| data.get(key))
+        .or_else(|| body.get(key));
+    let Some(list) = list else {
+        return Vec::new();
+    };
+    let result = list.get("result").unwrap_or(list);
+    match result {
+        Value::Array(items) => items.clone(),
+        Value::Object(map) => map.values().cloned().collect(),
+        _ => Vec::new(),
+    }
+}
+
+pub(crate) fn luogu_record_items(value: &Value) -> Vec<Value> {
+    luogu_list_items(value, "records")
+}
+
+fn luogu_problem_items(value: &Value) -> Vec<Value> {
+    luogu_list_items(value, "problems")
+}
+
 async fn sync_luogu(
     app: &AppHandle,
     db: &Db,
@@ -836,7 +865,7 @@ async fn sync_luogu(
         let value = match luogu_fetch(
             app,
             automation,
-            &format!("/record/list?user_id={uid}&page={page}&_contentOnly=1"),
+            &format!("/record/list?user={uid}&user_id={uid}&page={page}&_contentOnly=1"),
         )
         .await
         {
@@ -848,13 +877,7 @@ async fn sync_luogu(
                 break;
             }
         };
-        let records = value
-            .get("body")
-            .and_then(|b| b.get("currentData"))
-            .and_then(|d| d.get("records"))
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
+        let records = luogu_record_items(&value);
         if records.is_empty() {
             break;
         }
@@ -959,13 +982,7 @@ async fn sync_luogu(
             Ok(v) => v,
             Err(_) => break,
         };
-        let problems = value
-            .get("body")
-            .and_then(|b| b.get("currentData"))
-            .and_then(|d| d.get("problems"))
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
+        let problems = luogu_problem_items(&value);
         if problems.is_empty() {
             break;
         }
@@ -1575,5 +1592,80 @@ pub fn platform_dto(platform: &str, account: Option<&Account>) -> crate::models:
             ],
             _ => vec![],
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_luogu_record_list_result() {
+        let value = json!({
+            "body": {
+                "currentData": {
+                    "records": {
+                        "result": [
+                            { "id": 1, "status": 12, "problem": { "pid": "P1001" } },
+                            { "id": 2, "status": 6, "problem": { "pid": "P1002" } }
+                        ],
+                        "count": 2,
+                        "perPage": 50
+                    }
+                }
+            }
+        });
+        let records = luogu_record_items(&value);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["problem"]["pid"], "P1001");
+    }
+
+    #[test]
+    fn extracts_luogu_record_map_and_legacy_array() {
+        let map = json!({
+            "body": {
+                "currentData": {
+                    "records": {
+                        "result": {
+                            "0": { "id": 3, "problem": { "pid": "P1003" } },
+                            "1": { "id": 4, "problem": { "pid": "P1004" } }
+                        },
+                        "count": 2
+                    }
+                }
+            }
+        });
+        assert_eq!(luogu_record_items(&map).len(), 2);
+
+        let legacy = json!({
+            "body": {
+                "currentData": {
+                    "records": [{ "id": 5, "problem": { "pid": "P1005" } }]
+                }
+            }
+        });
+        assert_eq!(luogu_record_items(&legacy).len(), 1);
+        assert!(luogu_record_items(&json!({"body": {}})).is_empty());
+    }
+
+    #[test]
+    fn extracts_luogu_problem_list_result() {
+        let value = json!({
+            "body": {
+                "currentData": {
+                    "problems": {
+                        "result": [
+                            { "pid": "P1001", "title": "A+B Problem", "difficulty": 1 },
+                            { "pid": "P1002", "title": "过河卒", "difficulty": 2 }
+                        ],
+                        "count": 2,
+                        "perPage": 50
+                    }
+                }
+            }
+        });
+        let problems = luogu_problem_items(&value);
+        assert_eq!(problems.len(), 2);
+        assert_eq!(problems[1]["pid"], "P1002");
     }
 }
