@@ -512,7 +512,7 @@ impl Default for SettingsDto {
             auto_submit: false,
             require_submit_confirm: true,
             allow_code_upload: true,
-            luogu_sync_depth: 300,
+            luogu_sync_depth: 500,
             auto_refresh_plan: true,
             report_dir: None,
             mock_mode: false,

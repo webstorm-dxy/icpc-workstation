@@ -736,16 +736,20 @@ async fn sync_atcoder(app: &AppHandle, db: &Db, account: Option<Account>) -> App
     Ok(())
 }
 
-/// Luogu returns `currentData.records` as a `List<RecordBase>` object
-/// (`{ result: RecordBase[], count, perPage }`), not as a bare array. Older
-/// pages and the web UI sometimes expose the rows directly, so accept both
-/// shapes plus the object-map form used when `result` is keyed by index.
+/// Luogu now answers with a Lentille envelope:
+/// `{ "data": { "records": { "result": [...], "count", "perPage" } } }`.
+/// Older deployments used `body.currentData.records`; accept both, and
+/// tolerate `result` being an index map or the list itself being an array.
+fn luogu_container(value: &Value) -> &Value {
+    let body = value.get("body").unwrap_or(value);
+    body.get("data")
+        .or_else(|| body.get("currentData"))
+        .unwrap_or(body)
+}
+
 pub(crate) fn luogu_list_items(value: &Value, key: &str) -> Vec<Value> {
     let body = value.get("body").unwrap_or(value);
-    let list = body
-        .get("currentData")
-        .and_then(|data| data.get(key))
-        .or_else(|| body.get(key));
+    let list = luogu_container(value).get(key).or_else(|| body.get(key));
     let Some(list) = list else {
         return Vec::new();
     };
@@ -755,6 +759,17 @@ pub(crate) fn luogu_list_items(value: &Value, key: &str) -> Vec<Value> {
         Value::Object(map) => map.values().cloned().collect(),
         _ => Vec::new(),
     }
+}
+
+fn luogu_record_per_page(value: &Value) -> Option<i64> {
+    luogu_container(value)
+        .get("records")?
+        .get("perPage")?
+        .as_i64()
+}
+
+pub(crate) fn luogu_data(value: &Value) -> Value {
+    luogu_container(value).clone()
 }
 
 pub(crate) fn luogu_record_items(value: &Value) -> Vec<Value> {
@@ -790,7 +805,7 @@ async fn sync_luogu(
         .get_json::<SettingsDto>("settings")
         .await
         .map(|s| s.luogu_sync_depth)
-        .unwrap_or(300)
+        .unwrap_or(500)
         .clamp(50, 2000);
 
     emit_progress(app, "luogu", "login", "打开洛谷并检查登录状态…", 5.0);
@@ -832,11 +847,7 @@ async fn sync_luogu(
 
     emit_progress(app, "luogu", "profile", "读取洛谷用户信息…", 25.0);
     let user_value = luogu_fetch(app, automation, &format!("/user/{uid}?_contentOnly=1")).await?;
-    let data = user_value
-        .get("body")
-        .and_then(|b| b.get("currentData"))
-        .cloned()
-        .unwrap_or(Value::Null);
+    let data = luogu_data(&user_value);
     let user = data.get("user").cloned().unwrap_or_else(|| data.clone());
     if let Some(name) = user.get("name").and_then(|v| v.as_str()) {
         account.handle = Some(name.to_string());
@@ -858,10 +869,13 @@ async fn sync_luogu(
     }
 
     emit_progress(app, "luogu", "submissions", "读取洛谷提交记录…", 45.0);
-    let per_page = 50i64;
-    let pages = ((depth + per_page - 1) / per_page).clamp(1, 40);
+    // Lentille returns 20 records per page. Use the actual page size to cover
+    // the configured depth instead of assuming a 50-row page.
+    let mut per_page = 20i64;
+    let mut pages = ((depth + per_page - 1) / per_page).clamp(1, 50);
+    let mut page = 1i64;
     let mut seeds = Vec::new();
-    for page in 1..=pages {
+    while page <= pages {
         let value = match luogu_fetch(
             app,
             automation,
@@ -877,6 +891,12 @@ async fn sync_luogu(
                 break;
             }
         };
+        if page == 1 {
+            per_page = luogu_record_per_page(&value)
+                .unwrap_or(per_page)
+                .clamp(1, 100);
+            pages = ((depth + per_page - 1) / per_page).clamp(1, 50);
+        }
         let records = luogu_record_items(&value);
         if records.is_empty() {
             break;
@@ -916,7 +936,7 @@ async fn sync_luogu(
                 .unwrap_or_else(|| format!("{pid}-{submit_time}"));
             let title = record
                 .get("problem")
-                .and_then(|p| p.get("title"))
+                .and_then(|p| p.get("title").or_else(|| p.get("name")))
                 .and_then(|v| v.as_str())
                 .unwrap_or(&pid)
                 .to_string();
@@ -967,6 +987,10 @@ async fn sync_luogu(
             format!("已读取第 {page} 页提交…"),
             45.0 + (page as f64 / pages as f64) * 30.0,
         );
+        if page < pages {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+        page += 1;
     }
     upsert_submissions(db, &seeds).await?;
 
@@ -1004,6 +1028,7 @@ async fn sync_luogu(
                 native_id: pid.clone(),
                 title: problem
                     .get("title")
+                    .or_else(|| problem.get("name"))
                     .and_then(|v| v.as_str())
                     .unwrap_or(&pid)
                     .to_string(),
@@ -1098,6 +1123,15 @@ async fn luogu_fetch(
             .and_then(|v| v.as_str())
             .unwrap_or("网络错误");
         return Err(AppError::network(format!("洛谷页面请求失败: {err}")));
+    }
+    let body = value.get("body");
+    let has_json_envelope = body
+        .and_then(|b| b.get("data").or_else(|| b.get("currentData")))
+        .is_some();
+    if body.and_then(|b| b.get("__raw")).is_some() && !has_json_envelope {
+        return Err(AppError::network(
+            "洛谷返回了网页而不是 JSON，请确认登录状态后重试",
+        ));
     }
     Ok(value)
 }
@@ -1437,10 +1471,8 @@ async fn fetch_luogu_statement(
         &format!("/problem/{native_id}?_contentOnly=1"),
     )
     .await?;
-    let problem = value
-        .get("body")
-        .and_then(|b| b.get("currentData"))
-        .and_then(|d| d.get("problem"))
+    let problem = luogu_data(&value)
+        .get("problem")
         .cloned()
         .unwrap_or(Value::Null);
     let statement = problem
@@ -1667,5 +1699,63 @@ mod tests {
         let problems = luogu_problem_items(&value);
         assert_eq!(problems.len(), 2);
         assert_eq!(problems[1]["pid"], "P1002");
+    }
+
+    #[test]
+    fn extracts_lentille_records_and_user() {
+        let records = json!({
+            "body": {
+                "instance": "main",
+                "template": "record.list",
+                "status": 200,
+                "data": {
+                    "records": {
+                        "perPage": 20,
+                        "count": 2,
+                        "result": [
+                            { "id": 9, "status": 12, "problem": { "pid": "P1746", "name": "离开中山路" } }
+                        ]
+                    }
+                }
+            }
+        });
+        assert_eq!(luogu_record_items(&records).len(), 1);
+        assert_eq!(luogu_record_per_page(&records), Some(20));
+        assert_eq!(
+            luogu_record_items(&records)[0]["problem"]["name"],
+            "离开中山路"
+        );
+
+        let user = json!({
+            "body": {
+                "data": {
+                    "user": { "name": "daxingyi", "passedProblemCount": 78 },
+                    "elo": []
+                }
+            }
+        });
+        let data = luogu_data(&user);
+        assert_eq!(data["user"]["name"], "daxingyi");
+        assert_eq!(data["user"]["passedProblemCount"], 78);
+    }
+
+    #[test]
+    fn extracts_lentille_problem_list() {
+        let value = json!({
+            "body": {
+                "data": {
+                    "problems": {
+                        "perPage": 50,
+                        "count": 18073,
+                        "result": [
+                            { "pid": "P1001", "name": "A+B Problem", "difficulty": 1 }
+                        ]
+                    }
+                }
+            }
+        });
+        let problems = luogu_problem_items(&value);
+        assert_eq!(problems.len(), 1);
+        assert_eq!(problems[0]["name"], "A+B Problem");
     }
 }

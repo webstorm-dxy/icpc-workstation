@@ -648,7 +648,7 @@ export default function SettingsPage() {
               min={50}
               max={2000}
               step={50}
-              value={currentSettings?.luoguSyncDepth ?? 300}
+              value={currentSettings?.luoguSyncDepth ?? 500}
               onChange={(value) => {
                 if (typeof value === "number") patchSettings({ luoguSyncDepth: value });
               }}

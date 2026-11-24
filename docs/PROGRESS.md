@@ -24,7 +24,8 @@
 - 演示数据：21 题、12 提交、1 计划、1 报告；引导完成状态写入。
 - 生产 bundle：`pnpm tauri build --debug --bundles app` 成功（67.89 MiB）；直接运行 bundle 内二进制并从 `tauri://localhost#/onboarding` 读取 DOM，引导页正常、无 JS 错误。
 - macOS bundle identifier 已改为 `com.icpcworkstation.desktop`（避免 `.app` 后缀冲突）。
-- 修复洛谷同步题目数据：`/record/list` 的 `currentData.records` 是 `List<RecordBase>`（`{ result, count, perPage }`），原实现按数组解析导致同步到 0 条提交、训练计划不知道哪些题做过。现兼容 `result` 数组、对象映射、旧版直接数组三种形态；题库列表与洛谷提交判定轮询复用同一解析；同步完成后自动触发训练计划刷新。
+- 修复洛谷同步题目数据：洛谷已迁移到 Lentille 接口，必须发送 `X-Requested-With: XMLHttpRequest` + `x-lentille-request: content-only`；旧的 `x-luogu-type` 会拿到 HTML/302。响应顶部是 `data`（不是 `body.currentData`），`records` 是 `List<RecordBase>`（`{ result, count, perPage: 20 }`），题目标题字段是 `name`。现同时兼容 Lentille 与旧 DataResponse 形态，提交记录 / 题库 / 判题轮询复用同一解析，分页按实际 `perPage` 计算，默认深度 500。
+  实测你的账号：324 条提交、107 道尝试题、99 道通过，账号识别为 `daxingyi`。
 - 修复自动化面板遮挡：macOS 原生子 webview 坐标相对窗口 frame，而 DOM rect 相对内容 viewport；现在按 `window.inner_size - innerHeight` 计算顶部 title-bar inset（本机 28pt），在创建和更新时统一应用，自动化 header/关闭按钮不再被 OJ 页面覆盖。页面加载完成后状态由 `opening` 更新为 `ready`，状态标签中文化，设置/引导的输入框从已废弃的 `addonAfter` 迁移到 `Space.Compact`。
 
 ## 环境注意

@@ -326,7 +326,7 @@ impl AutomationManager {
         let start = format!(
             r#"(() => {{
                 window.__icpcResult = null;
-                fetch({path_json}, {{ credentials: 'include', headers: {{ 'x-luogu-type': 'content-only', 'Accept': 'application/json' }} }})
+                fetch({path_json}, {{ credentials: 'include', headers: {{ 'x-lentille-request': 'content-only', 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json' }} }})
                   .then(async (r) => {{
                     const text = await r.text();
                     let body;
