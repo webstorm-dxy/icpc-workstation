@@ -110,6 +110,28 @@ export interface AnalysisFeed {
   createdAt: string;
 }
 
+export interface PlanAgentEvent {
+  phase: string;
+  trigger?: string;
+  delta?: string;
+  message?: string;
+  code?: string;
+  provider?: string;
+  model?: string;
+  planId?: string;
+}
+
+export interface PlanAgentState {
+  open: boolean;
+  phase: string;
+  output: string;
+  status: string;
+  error: string | null;
+  provider?: string | null;
+  model?: string | null;
+  planId?: string;
+}
+
 export interface PlanItem {
   id: string;
   problemId: string;

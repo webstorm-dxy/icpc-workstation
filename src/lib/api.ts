@@ -17,6 +17,7 @@ import type {
   ModelInfo,
   OnboardingState,
   Plan,
+  PlanAgentEvent,
   Platform,
   PlatformLoginResult,
   Problem,
@@ -222,6 +223,10 @@ export const events = {
     listen<{ submissionId: string }>("analysis://updated", (e) => cb(e.payload)),
   onPlanUpdated: (cb: (e: { plan?: Plan }) => void): Promise<UnlistenFn> =>
     listen<{ plan?: Plan }>("plan://updated", (e) => cb(e.payload)),
+  onPlanAgent: (cb: (e: PlanAgentEvent) => void): Promise<UnlistenFn> =>
+    listen<PlanAgentEvent>("plan://agent", (e) => cb(e.payload)),
+  onPlanError: (cb: (e: { message: string; code?: string; trigger?: string }) => void): Promise<UnlistenFn> =>
+    listen<{ message: string; code?: string; trigger?: string }>("plan://error", (e) => cb(e.payload)),
   onSubmissionUpdated: (cb: (e: { id: string }) => void): Promise<UnlistenFn> =>
     listen<{ id: string }>("submission://updated", (e) => cb(e.payload)),
 };

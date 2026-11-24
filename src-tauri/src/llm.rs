@@ -856,6 +856,61 @@ impl LlmClient {
         }
     }
 
+    /// Streaming variant used when the caller wants to show the agent's raw
+    /// output while it is being produced (training-plan diagnosis, etc.).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn complete_json_stream<F>(
+        &self,
+        cfg: &ProviderConfig,
+        model: &str,
+        system: &str,
+        user: &str,
+        schema: Value,
+        max_tokens: i64,
+        on_delta: &mut F,
+    ) -> AppResult<Value>
+    where
+        F: FnMut(&str) + Send,
+    {
+        let req = ChatRequest {
+            model: model.to_string(),
+            messages: vec![LlmMessage::system(system), LlmMessage::user(user)],
+            tools: vec![],
+            temperature: Some(0.2),
+            max_tokens: Some(max_tokens),
+            json_mode: !cfg.is_anthropic(),
+            session_id: cfg.session_id.clone(),
+            cancel: None,
+        };
+        let mut buffer = String::new();
+        {
+            let mut on_event = |event: LlmEvent| {
+                if let LlmEvent::Text(delta) = event {
+                    buffer.push_str(&delta);
+                    on_delta(&delta);
+                }
+            };
+            self.chat_stream(cfg, &req, &mut on_event).await?;
+        }
+        if buffer.trim().is_empty() {
+            // Some providers emit no text deltas (or only reasoning); use the
+            // regular JSON path so the plan still gets a valid object.
+            return self
+                .complete_json(cfg, model, system, user, schema, max_tokens)
+                .await;
+        }
+        match serde_json::from_str::<Value>(&strip_code_fence(&buffer)) {
+            Ok(parsed) => Ok(parsed),
+            Err(err) => {
+                let repaired_user = format!(
+                    "{user}\n\n你上一次的输出不是合法 JSON（{err}）。请只输出一个合法 JSON 对象，不要 markdown 代码块。上一次输出：\n{buffer}"
+                );
+                self.complete_json_repair(cfg, model, system, &repaired_user, schema, max_tokens)
+                    .await
+            }
+        }
+    }
+
     async fn complete_json_repair(
         &self,
         cfg: &ProviderConfig,

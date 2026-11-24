@@ -24,6 +24,7 @@
 - 演示数据：21 题、12 提交、1 计划、1 报告；引导完成状态写入。
 - 生产 bundle：`pnpm tauri build --debug --bundles app` 成功（67.89 MiB）；直接运行 bundle 内二进制并从 `tauri://localhost#/onboarding` 读取 DOM，引导页正常、无 JS 错误。
 - macOS bundle identifier 已改为 `com.icpcworkstation.desktop`（避免 `.app` 后缀冲突）。
+- 训练计划生成改为 Agent-only：先读取最近 30 条提交、最多 8 份可用源码、已有分析和能力画像，要求模型输出 `diagnosis` 后再选题；Agent 的原始流式输出在全局 Drawer 展示，流式中断会用同一个 Agent 做一次非流式重试，重试仍失败则明确报错，不再回退到无 Agent 的确定性方案。洛谷同步会额外抓取最近 20 条提交源码供分析；没有源码的提交（如 Codeforces API）会在诊断中明确标注为仅判定证据。
 - Codeforces 绑定/同步改为 handle + 公开 API，不需要登录：设置卡片会在点“同步”时自动保存 handle，并提供“校验 handle”；“自动提交登录”仍保留但明确标注。内置 WebView 若被 Cloudflare Turnstile 拦截，验证登录时会给出明确提示，提交可改用系统浏览器 + 手动录入。
 - 修复洛谷同步题目数据：洛谷已迁移到 Lentille 接口，必须发送 `X-Requested-With: XMLHttpRequest` + `x-lentille-request: content-only`；旧的 `x-luogu-type` 会拿到 HTML/302。响应顶部是 `data`（不是 `body.currentData`），`records` 是 `List<RecordBase>`（`{ result, count, perPage: 20 }`），题目标题字段是 `name`。现同时兼容 Lentille 与旧 DataResponse 形态，提交记录 / 题库 / 判题轮询复用同一解析，分页按实际 `perPage` 计算，默认深度 500。
   实测你的账号：324 条提交、107 道尝试题、99 道通过，账号识别为 `daxingyi`。

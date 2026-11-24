@@ -14,6 +14,8 @@ import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { api, errText } from "../lib/api";
+import { MarkdownView } from "../lib/markdown";
+import { useAppStore } from "../store";
 import { difficultyLabel, planKindLabel } from "../lib/format";
 import { EmptyState, PageHeader, PlatformTag } from "../components/ui";
 import type { PlanItem } from "../types";
@@ -23,11 +25,14 @@ export default function TrainingPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [generating, setGenerating] = useState(false);
+  const openPlanAgent = useAppStore((s) => s.openPlanAgent);
+  const applyPlanAgent = useAppStore((s) => s.applyPlanAgent);
   const plan = useQuery({ queryKey: ["plan"], queryFn: api.getActivePlan });
 
   const generate = async () => {
+    openPlanAgent();
     setGenerating(true);
-    message.loading({ content: "Agent 正在分析你的画像并挑选题目…", key: "plan" });
+    message.loading({ content: "Agent 正在分析提交、代码与能力画像…", key: "plan" });
     try {
       await api.generatePlan({
         reason: "训练页手动生成",
@@ -37,7 +42,9 @@ export default function TrainingPage() {
       await queryClient.invalidateQueries({ queryKey: ["plan"] });
       await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     } catch (error) {
-      message.error({ content: errText(error), key: "plan" });
+      const detail = errText(error);
+      message.error({ content: detail, key: "plan" });
+      applyPlanAgent({ phase: "error", trigger: "manual", message: detail });
     } finally {
       setGenerating(false);
     }
@@ -47,7 +54,7 @@ export default function TrainingPage() {
     Modal.confirm({
       title: "重新生成训练计划？",
       content:
-        "Agent 会结合最新提交与薄弱标签挑选新题目，并替换当前 active 计划。历史计划会保留。",
+        "Agent 会先分析最近提交、可用的提交代码与既有分析，形成诊断后再挑选新题目，并替换当前 active 计划。历史计划会保留。",
       okText: "重新生成",
       cancelText: "取消",
       onOk: generate,
@@ -117,7 +124,9 @@ export default function TrainingPage() {
                   <Tag>{done} 已完成</Tag>
                   <span className="muted tiny">生成于 {data.createdAt.slice(0, 10)}</span>
                 </div>
-                <div className="muted small mt-8">{data.rationale}</div>
+                <div className="plan-rationale">
+                  <MarkdownView content={data.rationale} />
+                </div>
               </div>
               <div style={{ width: 220 }}>
                 <Progress percent={percent} size="small" />

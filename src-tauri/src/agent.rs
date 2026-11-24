@@ -624,7 +624,7 @@ async fn execute_tool(
         "get_problem" => get_problem(state, &args).await,
         "get_recent_submissions" => recent_submissions(state, &args).await,
         "generate_training_plan" | "refresh_training_plan" => {
-            generate_plan_tool(state, &args, &call.name).await
+            generate_plan_tool(state, app, &args, &call.name).await
         }
         "sync_platform" => sync_platform_tool(state, app, &args).await,
         "run_samples" => run_samples_tool(state, &args).await,
@@ -890,6 +890,7 @@ async fn recent_submissions(state: &SharedState, args: &Value) -> AppResult<(Str
 
 async fn generate_plan_tool(
     state: &SharedState,
+    app: &AppHandle,
     args: &Value,
     _tool: &str,
 ) -> AppResult<(String, Value)> {
@@ -909,6 +910,7 @@ async fn generate_plan_tool(
         .map(|s| s.to_string())
         .or_else(|| Some("对话中生成".into()));
     let plan = plan::generate_plan(
+        app,
         &state.db,
         &state.llm,
         GeneratePlanRequest {

@@ -29,7 +29,8 @@ DeepSeek 直连默认 `deepseek-flash`。设置 → Agent 角色可逐角色覆�
 
 ## 上下文
 
-- system = chat.md + 训练快照（账号、薄弱标签、active 计划、最近 6 次提交）。
+- 对话 system = chat.md + 训练快照（账号、薄弱标签、active 计划、最近 6 次提交）。
+- 训练计划使用 `recommend` 角色：最近 30 条提交、最多 8 份可用源码、已有分析与候选题目；模型先输出 `diagnosis`，再输出 `rationale` 和题目。原始输出通过 `plan://agent` 流式展示；流式中断会用同一 Agent 重试，失败则报错，不做无 Agent 回退。
 - 最近 24 条 user/assistant 消息。
 - 工具结果截断到 12k 字符。
 - 推理内容只实时展示，不写库、不回传。

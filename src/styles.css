@@ -679,3 +679,33 @@ body {
   flex: 1;
   min-width: 0;
 }
+
+/* Agent plan analysis drawer */
+.plan-agent-drawer .ant-drawer-body {
+  padding: 16px 20px;
+}
+.plan-agent-output-wrap {
+  max-height: 58vh;
+  overflow: auto;
+  padding: 12px 14px;
+  border: 1px solid #1e293b;
+  border-radius: 10px;
+  background: #08111f;
+}
+.plan-agent-output {
+  margin: 0;
+  color: #cbd5e1;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.plan-rationale {
+  margin-top: 10px;
+  max-height: 280px;
+  overflow: auto;
+}
+.plan-rationale .markdown p {
+  margin: 6px 0;
+}

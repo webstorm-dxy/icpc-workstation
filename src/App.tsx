@@ -15,6 +15,7 @@ import ReportsPage from "./pages/ReportsPage";
 import SettingsPage from "./pages/SettingsPage";
 import TrainingPage from "./pages/TrainingPage";
 import AutomationDrawer from "./components/AutomationDrawer";
+import PlanAgentDrawer from "./components/PlanAgentDrawer";
 import ConfirmToolModal from "./components/ConfirmToolModal";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { errText } from "./lib/api";
@@ -48,6 +49,7 @@ function useAppEvents() {
   const setAutomationOpen = useAppStore((s) => s.setAutomationOpen);
   const setConfirmation = useAppStore((s) => s.setConfirmation);
   const setSync = useAppStore((s) => s.setSync);
+  const applyPlanAgent = useAppStore((s) => s.applyPlanAgent);
 
   useEffect(() => {
     let disposed = false;
@@ -95,6 +97,17 @@ function useAppEvents() {
           queryClient.invalidateQueries({ queryKey: ["plan"] });
           queryClient.invalidateQueries({ queryKey: ["dashboard"] });
         }),
+        events.onPlanAgent((event) => {
+          applyPlanAgent(event);
+        }),
+        events.onPlanError((event) => {
+          message.error(event.message);
+          applyPlanAgent({
+            phase: "error",
+            trigger: event.trigger ?? "auto",
+            message: event.message,
+          });
+        }),
         events.onSubmissionUpdated(() => {
           queryClient.invalidateQueries({ queryKey: ["dashboard"] });
           queryClient.invalidateQueries({ queryKey: ["submissions"] });
@@ -120,6 +133,7 @@ function useAppEvents() {
     queryClient,
     setAutomationOpen,
     setAutomationState,
+    applyPlanAgent,
     setConfirmation,
     setSync,
   ]);

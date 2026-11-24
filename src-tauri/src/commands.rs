@@ -898,7 +898,7 @@ pub async fn generate_plan(
     state: State<'_, SharedState>,
     req: GeneratePlanRequest,
 ) -> AppResult<PlanDto> {
-    let plan = plan::generate_plan(&state.db, &state.llm, req).await?;
+    let plan = plan::generate_plan(&app, &state.db, &state.llm, req).await?;
     let _ = app.emit("plan://updated", json!({ "plan": plan }));
     Ok(plan)
 }
@@ -1527,7 +1527,8 @@ pub async fn seed_demo(app: &AppHandle, state: &SharedState) -> AppResult<String
         .db
         .set_json("onboarding.platforms", &vec!["codeforces".to_string()])
         .await?;
-    let _ = plan::generate_plan(
+    let _ = plan::generate_demo_plan(
+        app,
         &state.db,
         &state.llm,
         GeneratePlanRequest {

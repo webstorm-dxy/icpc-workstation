@@ -875,6 +875,7 @@ async fn sync_luogu(
     let mut pages = ((depth + per_page - 1) / per_page).clamp(1, 50);
     let mut page = 1i64;
     let mut seeds = Vec::new();
+    let mut code_targets: Vec<(String, String)> = Vec::new();
     while page <= pages {
         let value = match luogu_fetch(
             app,
@@ -944,6 +945,9 @@ async fn sync_luogu(
                 .get("problem")
                 .and_then(|p| p.get("difficulty"))
                 .and_then(|v| v.as_i64());
+            if code_targets.len() < 20 {
+                code_targets.push((format!("luogu:s{id}"), id.clone()));
+            }
             seeds.push(SubmissionSeed {
                 id: format!("luogu:s{id}"),
                 platform: "luogu".into(),
@@ -993,6 +997,36 @@ async fn sync_luogu(
         page += 1;
     }
     upsert_submissions(db, &seeds).await?;
+
+    if !code_targets.is_empty() {
+        emit_progress(app, "luogu", "code", "读取最近提交的代码…", 78.0);
+        for (submission_id, record_id) in &code_targets {
+            if let Ok(value) = luogu_fetch(
+                app,
+                automation,
+                &format!("/record/{record_id}?_contentOnly=1"),
+            )
+            .await
+            {
+                let data = luogu_data(&value);
+                let code = data
+                    .get("record")
+                    .and_then(|record| record.get("sourceCode"))
+                    .and_then(|value| value.as_str());
+                if let Some(code) = code.filter(|code| !code.trim().is_empty()) {
+                    let _ = sqlx::query(
+                        "INSERT INTO submission_code(submission_id, code_text) VALUES(?1, ?2)
+                         ON CONFLICT(submission_id) DO UPDATE SET code_text = excluded.code_text",
+                    )
+                    .bind(submission_id)
+                    .bind(code)
+                    .execute(&db.pool)
+                    .await;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(120)).await;
+        }
+    }
 
     emit_progress(app, "luogu", "candidates", "读取洛谷题目池…", 82.0);
     for page in 1..=3 {
