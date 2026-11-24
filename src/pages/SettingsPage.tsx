@@ -217,16 +217,17 @@ function PlatformCard({ platform }: { platform: Platform }) {
     >
       <Space orientation="vertical" style={{ width: "100%" }} size={8}>
         <div className="muted tiny">{platform.description}</div>
-        <Input
-          value={handle}
-          onChange={(event) => setHandle(event.target.value)}
-          placeholder={platform.handleLabel}
-          addonAfter={
-            <Button type="link" size="small" loading={saving} onClick={save}>
-              保存
-            </Button>
-          }
-        />
+        <Space.Compact style={{ width: "100%" }}>
+          <Input
+            style={{ flex: 1 }}
+            value={handle}
+            onChange={(event) => setHandle(event.target.value)}
+            placeholder={platform.handleLabel}
+          />
+          <Button loading={saving} onClick={save}>
+            保存
+          </Button>
+        </Space.Compact>
         <Space wrap>
           <Button
             size="small"

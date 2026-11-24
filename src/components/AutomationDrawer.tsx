@@ -2,7 +2,7 @@ import { App, Alert, Button, Space, Tag } from "antd";
 import { CloseOutlined, ReloadOutlined } from "@ant-design/icons";
 import { useCallback, useEffect, useRef } from "react";
 import { api, errText } from "../lib/api";
-import { platformName, statusColor } from "../lib/format";
+import { automationStatusLabel, platformName, statusColor } from "../lib/format";
 import { useAppStore } from "../store";
 
 export default function AutomationDrawer() {
@@ -31,6 +31,7 @@ export default function AutomationDrawer() {
         y: rect.top,
         width: rect.width,
         height: rect.height,
+        viewportHeight: window.innerHeight,
       })
       .catch(() => {});
   }, [platform]);
@@ -64,6 +65,7 @@ export default function AutomationDrawer() {
           y: rect.top,
           width: rect.width,
           height: rect.height,
+          viewportHeight: window.innerHeight,
         });
         clearRequest();
       } catch (error) {
@@ -128,7 +130,7 @@ export default function AutomationDrawer() {
         <div className="automation-header">
           <strong>{platformName(platform)} 自动化面板</strong>
           <Tag color={statusColor(automation?.status ?? "running")}>
-            {automation?.status ?? "running"}
+            {automationStatusLabel(automation?.status)}
           </Tag>
           <span className="muted tiny grow">
             {automation?.message || "正在准备页面…"}

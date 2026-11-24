@@ -412,28 +412,22 @@ export default function OnboardingPage() {
                     }
                   >
                     <Space orientation="vertical" style={{ width: "100%" }}>
-                      <Input
-                        value={handles[platform] ?? ""}
-                        onChange={(event) =>
-                          setHandles((current) => ({
-                            ...current,
-                            [platform]: event.target.value,
-                          }))
-                        }
-                        placeholder={
-                          platform === "luogu" ? "洛谷 UID（数字）" : "用户名 / handle"
-                        }
-                        addonAfter={
-                          <Button
-                            type="link"
-                            size="small"
-                            style={{ padding: 0 }}
-                            onClick={() => saveHandle(platform)}
-                          >
-                            保存
-                          </Button>
-                        }
-                      />
+                      <Space.Compact style={{ width: "100%" }}>
+                        <Input
+                          style={{ flex: 1 }}
+                          value={handles[platform] ?? ""}
+                          onChange={(event) =>
+                            setHandles((current) => ({
+                              ...current,
+                              [platform]: event.target.value,
+                            }))
+                          }
+                          placeholder={
+                            platform === "luogu" ? "洛谷 UID（数字）" : "用户名 / handle"
+                          }
+                        />
+                        <Button onClick={() => saveHandle(platform)}>保存</Button>
+                      </Space.Compact>
                       <Space wrap>
                         <Button
                           icon={<LoginOutlined />}

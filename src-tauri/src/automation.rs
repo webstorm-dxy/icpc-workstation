@@ -3,7 +3,7 @@ use crate::models::{AutomationBounds, AutomationEvent, AutomationStateDto};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Mutex;
-use tauri::webview::{NewWindowResponse, WebviewBuilder};
+use tauri::webview::{NewWindowResponse, PageLoadEvent, WebviewBuilder};
 use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Webview, WebviewUrl, Wry};
 use tokio::sync::oneshot;
 use url::Url;
@@ -117,7 +117,7 @@ impl AutomationManager {
             let _ = view.navigate(target);
             let _ = view.show();
             if let Some(bounds) = bounds {
-                apply_bounds(&view, &bounds);
+                apply_bounds(app, &view, &bounds);
             }
             let mut state = self.state(platform);
             state.visible = true;
@@ -148,6 +148,16 @@ impl AutomationManager {
                         "event": format!("{:?}", payload.event())
                     }),
                 );
+                if matches!(payload.event(), PageLoadEvent::Finished) {
+                    let state = app_for_load.state::<crate::state::SharedState>();
+                    let mut current = state.automation.state(&platform_for_load);
+                    if current.status == "opening" {
+                        current.status = "ready".into();
+                        current.message = "页面已加载，可在此登录或操作".into();
+                        current.url = Some(payload.url().to_string());
+                        state.automation.set_state(&app_for_load, current);
+                    }
+                }
                 let _ = view;
             })
             .on_navigation(move |url| {
@@ -172,11 +182,13 @@ impl AutomationManager {
             y: 0.0,
             width: 640.0,
             height: 600.0,
+            viewport_height: None,
         });
+        let inset = top_inset(app, &bounds);
         let view = window
             .add_child(
                 builder,
-                LogicalPosition::new(bounds.x, bounds.y),
+                LogicalPosition::new(bounds.x.max(0.0), (bounds.y + inset).max(0.0)),
                 LogicalSize::new(bounds.width.max(100.0), bounds.height.max(100.0)),
             )
             .map_err(|e| AppError::new("E_AUTOMATION", format!("无法创建 OJ 页面窗口: {e}")))?;
@@ -199,7 +211,7 @@ impl AutomationManager {
         Ok(())
     }
 
-    pub fn set_bounds(&self, platform: &str, bounds: &AutomationBounds) {
+    pub fn set_bounds(&self, app: &AppHandle, platform: &str, bounds: &AutomationBounds) {
         if let Some(view) = self
             .views
             .lock()
@@ -207,7 +219,7 @@ impl AutomationManager {
             .get(platform)
             .cloned()
         {
-            apply_bounds(&view, bounds);
+            apply_bounds(app, &view, bounds);
         }
     }
 
@@ -385,8 +397,39 @@ impl AutomationManager {
     }
 }
 
-fn apply_bounds(view: &Webview<Wry>, bounds: &AutomationBounds) {
-    let _ = view.set_position(LogicalPosition::new(bounds.x.max(0.0), bounds.y.max(0.0)));
+fn top_inset(app: &AppHandle, bounds: &AutomationBounds) -> f64 {
+    // The DOM rect is relative to the UI webview's viewport. Native child
+    // webviews are placed in window-frame coordinates. On macOS the viewport
+    // starts below the title bar while the frame does not, which would make
+    // the OJ page cover the automation header if the raw DOM y were used.
+    let window = app.get_window("main");
+    let scale = window
+        .as_ref()
+        .and_then(|window| window.scale_factor().ok())
+        .unwrap_or(1.0);
+    let frame_height = window
+        .as_ref()
+        .and_then(|window| window.inner_size().ok())
+        .map(|size| size.height as f64 / scale)
+        .unwrap_or(0.0);
+    compute_top_inset(frame_height, bounds.viewport_height)
+}
+
+fn compute_top_inset(frame_height: f64, viewport_height: Option<f64>) -> f64 {
+    match viewport_height {
+        Some(viewport_height) if viewport_height > 0.0 && frame_height > 0.0 => {
+            (frame_height - viewport_height).max(0.0)
+        }
+        _ => 0.0,
+    }
+}
+
+fn apply_bounds(app: &AppHandle, view: &Webview<Wry>, bounds: &AutomationBounds) {
+    let inset = top_inset(app, bounds);
+    let _ = view.set_position(LogicalPosition::new(
+        bounds.x.max(0.0),
+        (bounds.y + inset).max(0.0),
+    ));
     let _ = view.set_size(LogicalSize::new(
         bounds.width.max(100.0),
         bounds.height.max(100.0),
@@ -419,6 +462,13 @@ mod tests {
         assert!(allowed_host("luogu", "www.luogu.com.cn"));
         assert!(!allowed_host("luogu", "codeforces.com"));
         assert!(!allowed_host("atcoder", "evil-atcoder.jp"));
+    }
+
+    #[test]
+    fn computes_title_bar_inset() {
+        assert!((compute_top_inset(870.0, Some(842.0)) - 28.0).abs() < f64::EPSILON);
+        assert_eq!(compute_top_inset(842.0, Some(842.0)), 0.0);
+        assert_eq!(compute_top_inset(870.0, None), 0.0);
     }
 
     #[test]

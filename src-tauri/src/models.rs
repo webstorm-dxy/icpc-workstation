@@ -379,6 +379,12 @@ pub struct AutomationBounds {
     pub y: f64,
     pub width: f64,
     pub height: f64,
+    /// CSS viewport height reported by the UI webview. On macOS the native
+    /// child WebView is positioned relative to the window frame while the UI
+    /// webview viewport starts below the title bar; the difference is applied
+    /// as a top offset so the page does not cover the automation header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewport_height: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

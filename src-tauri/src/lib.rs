@@ -55,109 +55,19 @@ pub fn run() {
                 .build()?;
             let size = window.inner_size()?;
             let scale = window.scale_factor()?;
-            let logical = tauri::LogicalSize::new(
-                size.width as f64 / scale,
-                size.height as f64 / scale,
-            );
+            let logical =
+                tauri::LogicalSize::new(size.width as f64 / scale, size.height as f64 / scale);
             window.add_child(
-                tauri::webview::WebviewBuilder::new("ui", tauri::WebviewUrl::App("index.html".into()))
-                    .auto_resize()
-                    .initialization_script(
-                        r#"window.__ICPC_ERRORS__ = [];
-(function () {
-  var push = function (v) { try { window.__ICPC_ERRORS__.push(String(v)); } catch (_) {} };
-  window.addEventListener('error', function (event) { push(event.message || 'error'); });
-  window.addEventListener('unhandledrejection', function (event) { push(event.reason || 'rejection'); });
-  window.addEventListener('securitypolicyviolation', function (event) { push('CSP: ' + event.violatedDirective + ' ' + event.blockedURI); });
-  var origError = console.error;
-  console.error = function () { push(Array.prototype.map.call(arguments, String).join(' ')); return origError.apply(console, arguments); };
-})();"#,
-                    ),
+                tauri::webview::WebviewBuilder::new(
+                    "ui",
+                    tauri::WebviewUrl::App("index.html".into()),
+                )
+                .auto_resize(),
                 tauri::LogicalPosition::new(0.0, 0.0),
                 logical,
             )?;
             window.show()?;
             window.set_focus()?;
-            if let Ok(test_url) = std::env::var("ICPC_TEST_OPEN_URL") {
-                let app_open = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    let state = app_open.state::<state::SharedState>().inner().clone();
-                    let bounds = models::AutomationBounds {
-                        x: 40.0,
-                        y: 80.0,
-                        width: 720.0,
-                        height: 620.0,
-                    };
-                    let opened = state
-                        .automation
-                        .open(&app_open, "codeforces", &test_url, Some(bounds))
-                        .await;
-                    let mut out = serde_json::json!({
-                        "openOk": opened.is_ok(),
-                        "openError": opened.err().map(|e| e.message),
-                    });
-                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                    if let Ok(value) = state
-                        .automation
-                        .eval_json(
-                            "codeforces",
-                            "({title: document.title, url: location.href, ready: document.readyState, len: (document.body && document.body.innerText || '').length})",
-                            5_000,
-                        )
-                        .await
-                    {
-                        out["page"] = value;
-                    }
-                    if let Ok(path) = std::env::var("ICPC_TEST_OPEN_DUMP") {
-                        let _ = std::fs::write(path, out.to_string());
-                    }
-                    state.automation.close("codeforces");
-                });
-            }
-            if let Some(dump_path) = std::env::var("ICPC_DUMP_UI").ok().filter(|v| !v.is_empty()) {
-                let app_dump = app.handle().clone();
-                std::thread::spawn(move || {
-                    for _ in 0..20 {
-                        std::thread::sleep(std::time::Duration::from_millis(800));
-                        if let Some(webview) = app_dump.get_webview("ui") {
-                            let (tx, rx) = std::sync::mpsc::channel::<String>();
-                            let tx = std::sync::Mutex::new(Some(tx));
-                            let js = r#"({
-                                url: location.href,
-                                hash: location.hash,
-                                title: document.title,
-                                text: (document.body && document.body.innerText || '').slice(0, 40000),
-                                htmlLen: document.body ? document.body.innerHTML.length : 0,
-                                rootLen: (document.getElementById('root') && document.getElementById('root').innerHTML.length) || 0,
-                                cards: document.querySelectorAll('.ant-card').length,
-                                buttons: document.querySelectorAll('button').length,
-                                rows: document.querySelectorAll('tr').length,
-                                scripts: document.querySelectorAll('script').length,
-                                errors: window.__ICPC_ERRORS__ || []
-                            })"#;
-                            let ok = webview
-                                .eval_with_callback(js, move |result| {
-                                    if let Some(tx) = tx.lock().expect("dump lock").take() {
-                                        let _ = tx.send(result);
-                                    }
-                                })
-                                .is_ok();
-                            if ok {
-                                if let Ok(result) = rx.recv_timeout(std::time::Duration::from_secs(2)) {
-                                    let _ = std::fs::write(&dump_path, &result);
-                                    let text_len = serde_json::from_str::<serde_json::Value>(&result)
-                                        .ok()
-                                        .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(|t| t.len()))
-                                        .unwrap_or(0);
-                                    if text_len > 0 {
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                });
-            }
             if let Ok(route) = std::env::var("ICPC_START_ROUTE") {
                 let app_route = app.handle().clone();
                 std::thread::spawn(move || {

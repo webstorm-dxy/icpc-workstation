@@ -86,6 +86,7 @@ pub const DEFAULT_BOUNDS: AutomationBounds = AutomationBounds {
     y: 0.0,
     width: 720.0,
     height: 640.0,
+    viewport_height: None,
 };
 
 #[derive(Debug, Clone)]

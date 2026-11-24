@@ -560,11 +560,12 @@ pub async fn verify_platform_login(
 
 #[tauri::command]
 pub async fn set_automation_bounds(
+    app: AppHandle,
     state: State<'_, SharedState>,
     platform: String,
     bounds: AutomationBounds,
 ) -> AppResult<()> {
-    state.automation.set_bounds(&platform, &bounds);
+    state.automation.set_bounds(&app, &platform, &bounds);
     Ok(())
 }
 

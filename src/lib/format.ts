@@ -59,7 +59,10 @@ export function statusColor(status: string): string {
       return "green";
     case "running":
     case "judging":
+    case "opening":
       return "blue";
+    case "ready":
+      return "green";
     case "error":
     case "WA":
     case "RE":
@@ -68,6 +71,25 @@ export function statusColor(status: string): string {
       return "orange";
     default:
       return "default";
+  }
+}
+
+export function automationStatusLabel(status?: string | null): string {
+  switch (status) {
+    case "opening":
+      return "打开中";
+    case "ready":
+      return "已就绪";
+    case "running":
+      return "进行中";
+    case "needs_human":
+      return "需要你操作";
+    case "idle":
+      return "已关闭";
+    case "error":
+      return "出错";
+    default:
+      return status || "进行中";
   }
 }
 

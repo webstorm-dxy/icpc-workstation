@@ -253,6 +253,8 @@ export interface AutomationBounds {
   y: number;
   width: number;
   height: number;
+  /** UI webview CSS viewport height, used to correct the native top inset. */
+  viewportHeight?: number;
 }
 
 export interface AutomationState {
