@@ -1,7 +1,7 @@
 {
   "version": 1,
   "created_at": "2026-11-24T08:27:49Z",
-  "updated_at": "2026-11-25T07:11:44Z",
+  "updated_at": "2026-11-25T07:25:44Z",
   "files": {
     ".editorconfig": {
       "role": "index",
@@ -15,6 +15,12 @@
       "size": 19,
       "normalized_sha256": "d60f352d0db1404c70afb4bb8b2ca3fd1c610572aa40720e8a0b7baa7885418c"
     },
+    ".github/workflows/ci.yml": {
+      "role": "index",
+      "sha256": "88c3d66d8aba8426e40e23a003f3e4de014854377dacac634c92dc800c55a122",
+      "size": 1130,
+      "normalized_sha256": "88c3d66d8aba8426e40e23a003f3e4de014854377dacac634c92dc800c55a122"
+    },
     ".gitignore": {
       "role": "index",
       "sha256": "e4ec8a863ab7ea2512815ea5d12e83e6728fc14ab2b8b74453c24fc819cf7408",
@@ -27,17 +33,23 @@
       "size": 15450,
       "normalized_sha256": "15de50d6598b36f2db41066b71458e6c996b09fae1329f068ce7b565c6ea90fb"
     },
+    "LICENSE": {
+      "role": "index",
+      "sha256": "c70220a5e7bf47518292d98396663df866dba8d59b197abb9eccb39e2228256d",
+      "size": 1069,
+      "normalized_sha256": "c70220a5e7bf47518292d98396663df866dba8d59b197abb9eccb39e2228256d"
+    },
     "README.md": {
       "role": "index",
-      "sha256": "b0a1320badd7c388c7c038caba9f1c7b3797097e52f1a4d30d8199b9d4662892",
-      "size": 6665,
-      "normalized_sha256": "b0a1320badd7c388c7c038caba9f1c7b3797097e52f1a4d30d8199b9d4662892"
+      "sha256": "e84bf53a5e2b3ac0f5881973da5ead081ed454e15c90a6983a8f3ae783a0b807",
+      "size": 7428,
+      "normalized_sha256": "e84bf53a5e2b3ac0f5881973da5ead081ed454e15c90a6983a8f3ae783a0b807"
     },
     "aoci.code.txt": {
       "role": "index",
-      "sha256": "eadf4e902679f919ef01980b3ae1ff25772b96128143abd1a2b7d035902f2dba",
-      "size": 50908,
-      "normalized_sha256": "eadf4e902679f919ef01980b3ae1ff25772b96128143abd1a2b7d035902f2dba"
+      "sha256": "a58751a074b78029c14815637baffd6d8852ddfef9ca423787b04640de380c1d",
+      "size": 52444,
+      "normalized_sha256": "a58751a074b78029c14815637baffd6d8852ddfef9ca423787b04640de380c1d"
     },
     "aoci.meta.txt": {
       "role": "index",
@@ -100,9 +112,9 @@
     },
     "package.json": {
       "role": "index",
-      "sha256": "bb7757317ef938ab95aac5c49d5cb9b9d8296a2ab2e8ec90a2a3c73610561dc0",
-      "size": 2043,
-      "normalized_sha256": "bb7757317ef938ab95aac5c49d5cb9b9d8296a2ab2e8ec90a2a3c73610561dc0"
+      "sha256": "490fb71901d84828fcc6aca3e90f7321dcc2b7dc9b2b98fb79376be3f0778782",
+      "size": 2334,
+      "normalized_sha256": "490fb71901d84828fcc6aca3e90f7321dcc2b7dc9b2b98fb79376be3f0778782"
     },
     "pnpm-lock.yaml": {
       "role": "observe",
