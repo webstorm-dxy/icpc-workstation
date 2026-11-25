@@ -1,7 +1,7 @@
 {
   "version": 1,
   "created_at": "2026-11-24T08:27:49Z",
-  "updated_at": "2026-11-25T07:25:44Z",
+  "updated_at": "2026-11-25T07:34:31Z",
   "files": {
     ".editorconfig": {
       "role": "index",
@@ -47,9 +47,9 @@
     },
     "aoci.code.txt": {
       "role": "index",
-      "sha256": "a58751a074b78029c14815637baffd6d8852ddfef9ca423787b04640de380c1d",
-      "size": 52444,
-      "normalized_sha256": "a58751a074b78029c14815637baffd6d8852ddfef9ca423787b04640de380c1d"
+      "sha256": "80e7a1bb8f74621565b3a89f0e9df1475f4890972603e6d13887aa81b1a52458",
+      "size": 52443,
+      "normalized_sha256": "80e7a1bb8f74621565b3a89f0e9df1475f4890972603e6d13887aa81b1a52458"
     },
     "aoci.meta.txt": {
       "role": "index",
@@ -112,15 +112,15 @@
     },
     "package.json": {
       "role": "index",
-      "sha256": "490fb71901d84828fcc6aca3e90f7321dcc2b7dc9b2b98fb79376be3f0778782",
-      "size": 2334,
-      "normalized_sha256": "490fb71901d84828fcc6aca3e90f7321dcc2b7dc9b2b98fb79376be3f0778782"
+      "sha256": "3487f2d4cd201fcd54222d8335933f884240b6bcb09768a2cef2b401bad4b188",
+      "size": 2365,
+      "normalized_sha256": "3487f2d4cd201fcd54222d8335933f884240b6bcb09768a2cef2b401bad4b188"
     },
     "pnpm-lock.yaml": {
       "role": "observe",
-      "sha256": "f2cfcf33bd02a861ff7c61b576d90f4b9e4ef87dccf9d52cf53cee80ac990015",
-      "size": 207482,
-      "normalized_sha256": "f2cfcf33bd02a861ff7c61b576d90f4b9e4ef87dccf9d52cf53cee80ac990015"
+      "sha256": "7d0b51a1e24af520662580e44ce948217b5479f3182dd67a01abc280940066e6",
+      "size": 208411,
+      "normalized_sha256": "7d0b51a1e24af520662580e44ce948217b5479f3182dd67a01abc280940066e6"
     },
     "scripts/check.sh": {
       "role": "index",
