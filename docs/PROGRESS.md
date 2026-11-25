@@ -24,6 +24,9 @@
 - 演示数据：21 题、12 提交、1 计划、1 报告；引导完成状态写入。
 - 生产 bundle：`pnpm tauri build --debug --bundles app` 成功（67.89 MiB）；直接运行 bundle 内二进制并从 `tauri://localhost#/onboarding` 读取 DOM，引导页正常、无 JS 错误。
 - macOS bundle identifier 已改为 `com.icpcworkstation.desktop`（避免 `.app` 后缀冲突）。
+- 修复历史数据里的洛谷标签占位符：早期同步把数字 id 直接写成 `tag-45` 之类的标签，数据面板只能显示无意义的 id。现在把 `/_lfe/tags` 得到的 id→名字字典持久化到 `luogu.tags`，并在启动（只用缓存、不弹浏览器）、打开洛谷题目、同步洛谷时各跑一次修库：重写 `problems.tags_json`/`skill_tags_json`、`plan_items.target_tags_json`，并把 `skill_profiles` 里的 `tag-45` 按 attempts 加权合并到真实标签上。实测用户库副本：16 条技能行 + 149 道题的占位符全部变成“二分/贪心/模拟/ST 表”等真实标签。
+- 修复配额平台拿不到候选（“洛谷 0/4 道”）：候选查询原本是一条 `ORDER BY ABS(rating-target) LIMIT 700` 的全局 SQL，11541 道 Codeforces 直接占满名额，洛谷/AtCoder 在进入配额逻辑之前就被挤掉。现在改为按平台分别取（每平台 250 条），配额平台在评级带内没有候选时再单独放宽区间；Agent 的 `list_candidates` 平台过滤也下推到 SQL。实测用户真实库副本（2 CF + 4 洛谷配额）得到“Codeforces 2/2 道，洛谷 4/4 道”。
+- 训练计划支持按平台配题：训练页可选择 Codeforces / AtCoder / 洛谷各出几道（总计 4–12），后端把配额写进 prompt 并在校验阶段强制执行（多余平台的题丢弃、不足的从同平台候选补齐，题池空则注明并用其他平台补齐），配额持久化到 `plan.quotas` 供提交后自动刷新沿用。
 - 训练计划生成改为 Agent-only：先读取最近 30 条提交、最多 8 份可用源码、已有分析和能力画像，要求模型输出 `diagnosis` 后再选题；Agent 的原始流式输出在全局 Drawer 展示，流式中断会用同一个 Agent 做一次非流式重试，重试仍失败则明确报错，不再回退到无 Agent 的确定性方案。洛谷同步会额外抓取最近 20 条提交源码供分析；没有源码的提交（如 Codeforces API）会在诊断中明确标注为仅判定证据。
 - Codeforces 绑定/同步改为 handle + 公开 API，不需要登录：设置卡片会在点“同步”时自动保存 handle，并提供“校验 handle”；“自动提交登录”仍保留但明确标注。内置 WebView 若被 Cloudflare Turnstile 拦截，验证登录时会给出明确提示，提交可改用系统浏览器 + 手动录入。
 - 修复洛谷同步题目数据：洛谷已迁移到 Lentille 接口，必须发送 `X-Requested-With: XMLHttpRequest` + `x-lentille-request: content-only`；旧的 `x-luogu-type` 会拿到 HTML/302。响应顶部是 `data`（不是 `body.currentData`），`records` 是 `List<RecordBase>`（`{ result, count, perPage: 20 }`），题目标题字段是 `name`。现同时兼容 Lentille 与旧 DataResponse 形态，提交记录 / 题库 / 判题轮询复用同一解析，分页按实际 `perPage` 计算，默认深度 500。

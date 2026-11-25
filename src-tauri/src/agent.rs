@@ -4,8 +4,8 @@ use crate::judge;
 use crate::llm::{ChatRequest, LlmEvent, LlmMessage, ToolCall, ToolSpec};
 use crate::models::{
     AgentDeltaEvent, AgentDoneEvent, AgentToolEvent, ChatMessageDto, ConversationDto,
-    GeneratePlanRequest, GenerateReportRequest, RunSamplesRequest, SendMessageResult,
-    SubmitRequest, ToolCallDto, ToolConfirmationDto,
+    GeneratePlanRequest, GenerateReportRequest, PlatformQuota, RunSamplesRequest,
+    SendMessageResult, SubmitRequest, ToolCallDto, ToolConfirmationDto,
 };
 use crate::plan;
 use crate::provider;
@@ -547,7 +547,8 @@ fn tool_specs() -> Vec<ToolSpec> {
                 "properties":{
                     "reason":{"type":"string"},
                     "focus_tags":{"type":"array","items":{"type":"string"}},
-                    "count":{"type":"integer","minimum":4,"maximum":12}
+                    "count":{"type":"integer","minimum":4,"maximum":12},
+                    "platforms":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["platform","count"],"properties":{"platform":{"type":"string","enum":["codeforces","atcoder","luogu"]},"count":{"type":"integer","minimum":0,"maximum":12}}},"description":"按 OJ 分配题数，例如 [{platform:codeforces,count:4},{platform:luogu,count:2}]；给出后总题数由这些配额之和决定"}
                 },
                 "additionalProperties":false
             }),
@@ -778,15 +779,20 @@ async fn list_candidates(state: &SharedState, args: &Value) -> AppResult<(String
                 .collect()
         })
         .unwrap_or_default();
+    // The platform filter must run in SQL: with >10k Codeforces rows a global
+    // distance-ordered query never reaches AtCoder/Luogu, so filtering
+    // afterwards would always answer "0 道".
     let rows = sqlx::query(
         "SELECT p.id, p.title, p.platform, p.rating, p.normalized_rating, p.skill_tags_json,
             EXISTS(SELECT 1 FROM submissions s WHERE s.problem_id = p.id AND s.verdict='AC') AS solved
-         FROM problems p WHERE p.normalized_rating BETWEEN ?1 AND ?2
+         FROM problems p
+         WHERE (?4 = '' OR p.platform = ?4) AND p.normalized_rating BETWEEN ?1 AND ?2
          ORDER BY ABS(p.normalized_rating - ?3) ASC LIMIT 300",
     )
     .bind(min)
     .bind(max)
     .bind((min + max) / 2)
+    .bind(platform.unwrap_or_default())
     .fetch_all(&state.db.pool)
     .await?;
     let mut items = Vec::new();
@@ -795,11 +801,6 @@ async fn list_candidates(state: &SharedState, args: &Value) -> AppResult<(String
             continue;
         }
         let row_platform: String = row.get("platform");
-        if let Some(p) = platform {
-            if p != row_platform {
-                continue;
-            }
-        }
         let skill_tags: Vec<String> =
             serde_json::from_str(row.get::<&str, _>("skill_tags_json")).unwrap_or_default();
         if !tags.is_empty() && !tags.iter().any(|t| skill_tags.contains(t)) {
@@ -904,6 +905,10 @@ async fn generate_plan_tool(
                 .collect()
         });
     let count = args.get("count").and_then(|v| v.as_i64());
+    let platforms = args
+        .get("platforms")
+        .and_then(|value| serde_json::from_value::<Vec<PlatformQuota>>(value.clone()).ok())
+        .filter(|quotas| !quotas.is_empty());
     let reason = args
         .get("reason")
         .and_then(|v| v.as_str())
@@ -917,7 +922,7 @@ async fn generate_plan_tool(
             reason,
             focus_tags,
             count,
-            platforms: None,
+            platforms,
         },
     )
     .await?;

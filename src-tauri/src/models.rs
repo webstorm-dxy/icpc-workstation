@@ -239,13 +239,25 @@ pub struct ProblemDto {
     pub attempted: bool,
 }
 
+/// How many problems a plan should take from one OJ.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlatformQuota {
+    pub platform: String,
+    pub count: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GeneratePlanRequest {
     pub reason: Option<String>,
     pub focus_tags: Option<Vec<String>>,
     pub count: Option<i64>,
-    pub platforms: Option<Vec<String>>,
+    /// Per-platform counts. `None`/empty keeps the platform-agnostic behaviour;
+    /// otherwise the plan must contain exactly these counts (summed into the
+    /// plan size).
+    #[serde(default)]
+    pub platforms: Option<Vec<PlatformQuota>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -486,8 +498,11 @@ pub struct ExportReportRequest {
     pub path: Option<String>,
 }
 
+// `default` keeps rows written before a field existed deserializable; without it
+// `get_settings` falls back to `unwrap_or_default()` and silently wipes every
+// stored preference.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct SettingsDto {
     pub theme: String,
     pub default_language: String,
@@ -500,6 +515,8 @@ pub struct SettingsDto {
     pub auto_refresh_plan: bool,
     pub report_dir: Option<String>,
     pub mock_mode: bool,
+    pub lsp_enabled: bool,
+    pub lsp_server_path: Option<String>,
 }
 
 impl Default for SettingsDto {
@@ -516,6 +533,8 @@ impl Default for SettingsDto {
             auto_refresh_plan: true,
             report_dir: None,
             mock_mode: false,
+            lsp_enabled: true,
+            lsp_server_path: None,
         }
     }
 }
@@ -534,6 +553,8 @@ pub struct SettingsPatch {
     pub auto_refresh_plan: Option<bool>,
     pub report_dir: Option<Option<String>>,
     pub mock_mode: Option<bool>,
+    pub lsp_enabled: Option<bool>,
+    pub lsp_server_path: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -581,4 +602,34 @@ pub struct AutomationEvent {
     pub needs_human: bool,
     pub hint: Option<String>,
     pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LspServerDto {
+    pub path: String,
+    pub name: String,
+    pub version: Option<String>,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartLspInput {
+    pub problem_id: String,
+    pub standard: String,
+    #[serde(default)]
+    pub server_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LspSessionDto {
+    pub session_id: String,
+    pub server: String,
+    pub server_version: Option<String>,
+    pub root_uri: String,
+    pub document_uri: String,
+    pub workspace: String,
+    pub language_id: String,
 }

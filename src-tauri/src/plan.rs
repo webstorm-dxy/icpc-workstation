@@ -1,7 +1,7 @@
 use crate::db::Db;
 use crate::error::{AppError, AppResult};
 use crate::llm::LlmClient;
-use crate::models::{GeneratePlanRequest, PlanDto, PlanItemDto, SettingsDto};
+use crate::models::{GeneratePlanRequest, PlanDto, PlanItemDto, PlatformQuota, SettingsDto};
 use crate::provider;
 use crate::util::{now_iso, parse_json_array};
 use chrono::{DateTime, Utc};
@@ -19,7 +19,8 @@ const PLANNER_SYSTEM: &str = r#"你是 ICPC 训练规划师，也是一名代码
 4. 至少覆盖 4 个不同的标签；不要连续 3 题同一标签。
 5. 至少 1 道 review（做过但没通过）或 1 道 stretch（难度高于目标 rating 150-300）。
 6. reason 要具体说明“为什么是这道题、练什么、对应诊断里的哪个问题”，不要写空话。
-7. 全部文本用简体中文。"#;
+7. 全部文本用简体中文。
+8. 如果给出了「题目来源配额」，必须严格按配额选题：每个平台的题目数量要精确等于配额，不能多也不能少；在配额内再考虑难度与标签匹配。"#;
 
 fn plan_schema() -> Value {
     json!({
@@ -60,6 +61,102 @@ struct Candidate {
     skill_tags: Vec<String>,
     attempted: bool,
     score: f64,
+}
+
+/// Sanitised `(platform, count)` pairs. Unknown platforms and zero counts are
+/// dropped, duplicates merge to the larger value, and the total is capped to
+/// the 12 items the plan schema accepts.
+fn normalize_quotas(platforms: Option<&Vec<PlatformQuota>>) -> Vec<(String, i64)> {
+    let mut out: Vec<(String, i64)> = Vec::new();
+    let Some(list) = platforms else {
+        return out;
+    };
+    for item in list {
+        let platform = item.platform.trim().to_ascii_lowercase();
+        if !crate::platforms::PLATFORMS.contains(&platform.as_str()) {
+            continue;
+        }
+        let count = item.count.clamp(0, 12);
+        if count == 0 {
+            continue;
+        }
+        match out.iter_mut().find(|(existing, _)| *existing == platform) {
+            Some(existing) => existing.1 = existing.1.max(count),
+            None => out.push((platform, count)),
+        }
+    }
+    loop {
+        let total: i64 = out.iter().map(|(_, count)| *count).sum();
+        if total <= 12 {
+            break;
+        }
+        let index = out
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, (_, count))| *count)
+            .map(|(index, _)| index);
+        match index {
+            Some(index) => out[index].1 -= 1,
+            None => break,
+        }
+        out.retain(|(_, count)| *count > 0);
+    }
+    out
+}
+
+fn quota_total(quotas: &[(String, i64)]) -> i64 {
+    quotas.iter().map(|(_, count)| *count).sum()
+}
+
+fn quota_summary(quotas: &[(String, i64)], items: &[PickedItem]) -> String {
+    quotas
+        .iter()
+        .map(|(platform, quota)| {
+            let have = items
+                .iter()
+                .filter(|item| &item.platform == platform)
+                .count();
+            format!(
+                "{} {}/{} 道",
+                crate::platforms::platform_name(platform),
+                have,
+                quota
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("，")
+}
+
+/// Keeps roughly five candidates per requested slot for every platform, then
+/// fills the rest of the (bounded) pool so the agent still sees alternatives.
+fn build_pool(mut candidates: Vec<Candidate>, quotas: &[(String, i64)]) -> Vec<Candidate> {
+    candidates.sort_by(|a, b| b.score.total_cmp(&a.score));
+    if quotas.is_empty() {
+        candidates.truncate(60);
+        return candidates;
+    }
+    let mut pool: Vec<Candidate> = Vec::new();
+    let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (platform, count) in quotas {
+        let mut budget = (*count * 5).max(8) as usize;
+        for candidate in candidates.iter().filter(|c| &c.platform == platform) {
+            if budget == 0 {
+                break;
+            }
+            if taken.insert(candidate.id.clone()) {
+                pool.push(candidate.clone());
+                budget -= 1;
+            }
+        }
+    }
+    let mut rest: Vec<Candidate> = candidates
+        .into_iter()
+        .filter(|candidate| !taken.contains(&candidate.id))
+        .collect();
+    rest.truncate(60usize.saturating_sub(pool.len()));
+    pool.extend(rest);
+    pool.sort_by(|a, b| b.score.total_cmp(&a.score));
+    pool
 }
 
 pub async fn active_plan(db: &Db) -> AppResult<Option<PlanDto>> {
@@ -196,7 +293,20 @@ async fn generate_plan_impl(
             "message": "读取最近提交、代码与能力画像…"
         }),
     );
-    let count = req.count.unwrap_or(8).clamp(4, 12);
+    let mut quotas = normalize_quotas(req.platforms.as_ref());
+    // A plan below four items is not a plan; grow the largest quota instead of
+    // failing the request.
+    let requested: i64 = quota_total(&quotas);
+    if !quotas.is_empty() && requested < 4 {
+        if let Some(widest) = quotas.iter_mut().max_by_key(|(_, count)| *count) {
+            widest.1 += 4 - requested;
+        }
+    }
+    let count = if quotas.is_empty() {
+        req.count.unwrap_or(8).clamp(4, 12)
+    } else {
+        quota_total(&quotas).clamp(4, 12)
+    };
     let target = target_rating(db).await?;
     let weak = if let Some(tags) = req.focus_tags.clone().filter(|t| !t.is_empty()) {
         tags
@@ -208,8 +318,23 @@ async fn generate_plan_impl(
     if candidates.len() < 10 {
         candidates = load_candidates_wide(db, target, &weak).await?;
     }
-    candidates.sort_by(|a, b| b.score.total_cmp(&a.score));
-    candidates.truncate(60);
+    // A requested platform whose whole pool sits outside the rating band would
+    // otherwise silently come back as "0/N 道"; widen the band just for it.
+    if !quotas.is_empty() {
+        let mut seen: std::collections::HashSet<String> =
+            candidates.iter().map(|c| c.id.clone()).collect();
+        for (platform, _) in &quotas {
+            if candidates.iter().any(|c| &c.platform == platform) {
+                continue;
+            }
+            for candidate in load_candidates_for(db, platform, 600, 3800, target, &weak).await? {
+                if seen.insert(candidate.id.clone()) {
+                    candidates.push(candidate);
+                }
+            }
+        }
+    }
+    let candidates = build_pool(candidates, &quotas);
     if candidates.is_empty() {
         let err = AppError::new(
             "E_PLAN_NO_CANDIDATES",
@@ -237,9 +362,16 @@ async fn generate_plan_impl(
                         "message": "Agent 正在分析提交与代码，再挑选题目…"
                     }),
                 );
-                let prompt =
-                    build_prompt(target, &weak, &candidates, count, &reason_text, &evidence)
-                        .await?;
+                let prompt = build_prompt(
+                    target,
+                    &weak,
+                    &candidates,
+                    count,
+                    &reason_text,
+                    &evidence,
+                    &quotas,
+                )
+                .await?;
                 let mut on_delta = |delta: &str| {
                     emit_agent(
                         app,
@@ -322,27 +454,29 @@ async fn generate_plan_impl(
                     }
                 };
                 match value {
-                    Some(value) => match normalize_payload(value, &candidates, count) {
-                        Ok(pair) => pair,
-                        Err(reason) => {
-                            if allow_fallback {
-                                deterministic_plan(&candidates, &weak, count)
-                            } else {
-                                let err = AppError::new(
-                                    "E_PLAN_OUTPUT",
-                                    format!("Agent 返回的训练计划无效：{reason}"),
-                                );
-                                emit_agent_error(app, trigger, &err);
-                                return Err(err);
+                    Some(value) => {
+                        match normalize_payload(value, &candidates, count, &quotas, &weak) {
+                            Ok(pair) => pair,
+                            Err(reason) => {
+                                if allow_fallback {
+                                    deterministic_plan(&candidates, &weak, count, &quotas)
+                                } else {
+                                    let err = AppError::new(
+                                        "E_PLAN_OUTPUT",
+                                        format!("Agent 返回的训练计划无效：{reason}"),
+                                    );
+                                    emit_agent_error(app, trigger, &err);
+                                    return Err(err);
+                                }
                             }
                         }
-                    },
-                    None => deterministic_plan(&candidates, &weak, count),
+                    }
+                    None => deterministic_plan(&candidates, &weak, count, &quotas),
                 }
             }
             Err(err) => {
                 if allow_fallback {
-                    deterministic_plan(&candidates, &weak, count)
+                    deterministic_plan(&candidates, &weak, count, &quotas)
                 } else {
                     let wrapped = AppError::new(
                         "E_PLAN_PROVIDER",
@@ -389,6 +523,17 @@ async fn generate_plan_impl(
         .await?;
     }
     tx.commit().await?;
+    // Remember the requested mix so the post-submission refresh keeps it.
+    if req.platforms.is_some() {
+        let stored: Vec<PlatformQuota> = quotas
+            .iter()
+            .map(|(platform, count)| PlatformQuota {
+                platform: platform.clone(),
+                count: *count,
+            })
+            .collect();
+        let _ = db.set_json("plan.quotas", &stored).await;
+    }
     emit_agent(
         app,
         json!({
@@ -426,6 +571,24 @@ async fn load_candidates_range(
     target: i64,
     weak: &[String],
 ) -> AppResult<Vec<Candidate>> {
+    let mut out = Vec::new();
+    for platform in crate::platforms::PLATFORMS {
+        out.extend(load_candidates_for(db, platform, min, max, target, weak).await?);
+    }
+    Ok(out)
+}
+
+/// One platform at a time on purpose: a large pool (Codeforces routinely has
+/// more than ten thousand problems) would otherwise fill the single capped
+/// query and AtCoder or Luogu would never reach the quota logic.
+async fn load_candidates_for(
+    db: &Db,
+    platform: &str,
+    min: i64,
+    max: i64,
+    target: i64,
+    weak: &[String],
+) -> AppResult<Vec<Candidate>> {
     let active_ids: Vec<String> = sqlx::query(
         "SELECT i.problem_id FROM plan_items i JOIN training_plans t ON t.id = i.plan_id
          WHERE t.status = 'active'",
@@ -440,13 +603,14 @@ async fn load_candidates_range(
             EXISTS(SELECT 1 FROM submissions s WHERE s.problem_id = p.id AND s.verdict = 'AC') AS solved,
             EXISTS(SELECT 1 FROM submissions s WHERE s.problem_id = p.id) AS attempted
          FROM problems p
-         WHERE p.normalized_rating BETWEEN ?1 AND ?2
+         WHERE p.platform = ?4 AND p.normalized_rating BETWEEN ?1 AND ?2
          ORDER BY ABS(p.normalized_rating - ?3) ASC
-         LIMIT 700",
+         LIMIT 250",
     )
     .bind(min)
     .bind(max)
     .bind(target)
+    .bind(platform)
     .fetch_all(&db.pool)
     .await?;
     let mut out = Vec::new();
@@ -646,6 +810,7 @@ async fn build_prompt(
     count: i64,
     reason: &str,
     evidence: &Value,
+    quotas: &[(String, i64)],
 ) -> AppResult<String> {
     let candidate_json = candidates
         .iter()
@@ -661,6 +826,23 @@ async fn build_prompt(
             })
         })
         .collect::<Vec<_>>();
+    let quota_instruction = if quotas.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n题目来源配额（必须严格遵守，items 里每个平台的数量要精确等于该数字，不能多也不能少）：{}。共 {} 道。\n",
+            quotas
+                .iter()
+                .map(|(platform, count)| format!(
+                    "{} {} 道",
+                    crate::platforms::platform_name(platform),
+                    count
+                ))
+                .collect::<Vec<_>>()
+                .join("，"),
+            count
+        )
+    };
     Ok(format!(
         r#"训练目标 rating：{target}
 本次触发原因：{reason}
@@ -669,26 +851,61 @@ async fn build_prompt(
 {evidence}
 候选题目（problem_id 只能从这里选）：
 {candidates}
-
-请先分析上面的提交与代码，在 diagnosis 中指出具体的错误模式、边界/实现缺陷、薄弱标签和证据；如果 code 为 null，明确说明只有判定/标签证据。不要粘贴大段代码，只引用关键片段。diagnosis 控制在 600 字内，rationale 控制在 300 字内，每个 reason 控制在 120 字内。然后给出 rationale 与 items，选出 {count} 道题（至少 4 道），输出符合要求的 JSON。items 的 kind 只能用 practice/review/stretch。"#,
+{quota}
+请先分析上面的提交与代码，在 diagnosis 中指出具体的错误模式、边界/实现缺陷、薄弱标签和证据；如果 code 为 null，明确说明只有判定/标签证据。不要粘贴大段代码，只引用关键片段。diagnosis 控制在 600 字内，rationale 控制在 300 字内，每个 reason 控制在 120 字内。然后给出 rationale 与 items，选出 {count} 道题（至少 4 道），输出符合要求的 JSON。items 的 kind 只能用 practice/review/stretch。如果给了来源配额，挑选时先在每个平台的配额内比较难度与标签匹配，再给出跨平台的整体训练顺序。"#,
         weak = weak.join(", "),
         evidence = serde_json::to_string(evidence).unwrap_or_else(|_| "{}".into()),
         candidates = serde_json::to_string(&candidate_json).unwrap_or_else(|_| "[]".into()),
+        quota = quota_instruction,
     ))
 }
 
 struct PickedItem {
     problem_id: String,
+    platform: String,
     kind: String,
     reason: String,
     target_tags: Vec<String>,
     expected_minutes: i64,
 }
 
+fn default_picked(candidate: &Candidate, kind: &str, weak: &[String]) -> PickedItem {
+    let chinese_kind = match kind {
+        "review" => "复盘",
+        "stretch" => "拉伸",
+        _ => "练习",
+    };
+    let tags = if candidate.skill_tags.is_empty() {
+        weak.iter().take(2).cloned().collect::<Vec<_>>()
+    } else {
+        candidate.skill_tags.clone()
+    };
+    PickedItem {
+        problem_id: candidate.id.clone(),
+        platform: candidate.platform.clone(),
+        kind: kind.to_string(),
+        reason: format!(
+            "{chinese_kind}：{}（难度 {}，平台 {}），覆盖 {}，匹配当前薄弱点。",
+            candidate.title,
+            candidate.normalized,
+            crate::platforms::platform_name(&candidate.platform),
+            if tags.is_empty() {
+                "综合".to_string()
+            } else {
+                tags.join("/")
+            }
+        ),
+        target_tags: tags,
+        expected_minutes: if candidate.normalized > 1800 { 70 } else { 45 },
+    }
+}
+
 fn normalize_payload(
     value: Value,
     candidates: &[Candidate],
     count: i64,
+    quotas: &[(String, i64)],
+    weak: &[String],
 ) -> Result<(String, Vec<PickedItem>), String> {
     let map: std::collections::HashMap<&str, &Candidate> =
         candidates.iter().map(|c| (c.id.as_str(), c)).collect();
@@ -707,6 +924,10 @@ fn normalize_payload(
         .unwrap_or_default()
         .trim()
         .to_string();
+    let mut remaining: std::collections::HashMap<&str, i64> = quotas
+        .iter()
+        .map(|(platform, quota)| (platform.as_str(), *quota))
+        .collect();
     let mut items = Vec::new();
     let mut seen = std::collections::HashSet::new();
     if let Some(arr) = value.get("items").and_then(|v| v.as_array()) {
@@ -720,6 +941,14 @@ fn normalize_payload(
             };
             if !seen.insert(problem_id.to_string()) {
                 continue;
+            }
+            if !quotas.is_empty() {
+                // Off-mix platforms and over-filled quotas are dropped; the
+                // shortfall is topped up below.
+                match remaining.get_mut(candidate.platform.as_str()) {
+                    Some(left) if *left > 0 => *left -= 1,
+                    _ => continue,
+                }
             }
             let kind = match item.get("kind").and_then(|v| v.as_str()) {
                 Some("review") => "review",
@@ -749,6 +978,7 @@ fn normalize_payload(
             };
             items.push(PickedItem {
                 problem_id: candidate.id.clone(),
+                platform: candidate.platform.clone(),
                 kind: kind.to_string(),
                 reason: item
                     .get("reason")
@@ -770,90 +1000,191 @@ fn normalize_payload(
             }
         }
     }
+
+    // Top up any platform the agent under-filled, so the mix is honoured even
+    // when the model ignores the quota.
+    let mut shortfalls: Vec<String> = Vec::new();
+    if !quotas.is_empty() {
+        for (platform, quota) in quotas {
+            let mut have = items
+                .iter()
+                .filter(|item| &item.platform == platform)
+                .count() as i64;
+            if have >= *quota {
+                continue;
+            }
+            for candidate in candidates.iter().filter(|c| &c.platform == platform) {
+                if have >= *quota || items.len() >= count as usize {
+                    break;
+                }
+                if !seen.insert(candidate.id.clone()) {
+                    continue;
+                }
+                items.push(default_picked(candidate, "practice", weak));
+                have += 1;
+            }
+            if have < *quota {
+                shortfalls.push(format!(
+                    "{} 的候选题目不足，实际安排 {have}/{} 道，差额由其他平台补齐",
+                    crate::platforms::platform_name(platform),
+                    quota
+                ));
+            }
+        }
+        // Never hand back a plan shorter than requested just because one
+        // platform ran dry.
+        if items.len() < count as usize {
+            for candidate in candidates {
+                if items.len() >= count as usize {
+                    break;
+                }
+                if !seen.insert(candidate.id.clone()) {
+                    continue;
+                }
+                items.push(default_picked(candidate, "practice", weak));
+            }
+        }
+    }
+
     if items.len() < 4 {
+        let detail = if shortfalls.is_empty() {
+            String::new()
+        } else {
+            format!("（{}）", shortfalls.join("；"))
+        };
         return Err(format!(
-            "只解析出 {} 道有效题目，至少需要 4 道",
+            "只解析出 {} 道有效题目，至少需要 4 道{detail}",
             items.len()
         ));
     }
+
+    let quota_block = if quotas.is_empty() {
+        String::new()
+    } else {
+        let mut text = format!("\n\n> 题目来源：{}。", quota_summary(quotas, &items));
+        for note in &shortfalls {
+            text.push_str(&format!("\n> {note}。"));
+        }
+        text
+    };
     let rationale = format!(
-        "## Agent 诊断\n\n{diagnosis}\n\n## 训练方案\n\n{}",
+        "## Agent 诊断\n\n{diagnosis}\n\n## 训练方案\n\n{}{}",
         if rationale.is_empty() {
             "根据诊断选择上述题目。"
         } else {
             &rationale
-        }
+        },
+        quota_block
     );
     Ok((rationale, items))
+}
+
+fn pick_into(
+    pool: &mut Vec<Candidate>,
+    take: usize,
+    items: &mut Vec<PickedItem>,
+    used_tags: &mut std::collections::HashSet<String>,
+    used_ids: &mut std::collections::HashSet<String>,
+    weak: &[String],
+) {
+    let mut taken = 0;
+    while taken < take && !pool.is_empty() {
+        // Prefer a candidate that adds a tag not covered yet.
+        let index = pool
+            .iter()
+            .position(|candidate| {
+                candidate
+                    .skill_tags
+                    .iter()
+                    .any(|tag| !used_tags.contains(tag))
+            })
+            .unwrap_or(0);
+        let candidate = pool.remove(index);
+        if !used_ids.insert(candidate.id.clone()) {
+            continue;
+        }
+        for tag in &candidate.skill_tags {
+            used_tags.insert(tag.clone());
+        }
+        let kind = if candidate.attempted {
+            "review"
+        } else if candidate.normalized > 1700 && items.iter().all(|item| item.kind != "stretch") {
+            "stretch"
+        } else {
+            "practice"
+        };
+        items.push(default_picked(&candidate, kind, weak));
+        taken += 1;
+    }
 }
 
 fn deterministic_plan(
     candidates: &[Candidate],
     weak: &[String],
     count: i64,
+    quotas: &[(String, i64)],
 ) -> (String, Vec<PickedItem>) {
     let mut sorted = candidates.to_vec();
     sorted.sort_by(|a, b| b.score.total_cmp(&a.score));
-    let mut items: Vec<PickedItem> = Vec::new();
-    let mut used_tags: std::collections::HashSet<String> = std::collections::HashSet::new();
     let target = count as usize;
-    let mut pool = sorted.clone();
-    // Prefer tag diversity first.
-    while items.len() < target && !pool.is_empty() {
-        let mut picked = None;
-        for (idx, candidate) in pool.iter().enumerate() {
-            let fresh_tags = candidate
-                .skill_tags
+    let mut items: Vec<PickedItem> = Vec::new();
+    let mut used_tags = std::collections::HashSet::new();
+    let mut used_ids = std::collections::HashSet::new();
+
+    if quotas.is_empty() {
+        let mut pool = sorted;
+        pick_into(
+            &mut pool,
+            target,
+            &mut items,
+            &mut used_tags,
+            &mut used_ids,
+            weak,
+        );
+    } else {
+        for (platform, quota) in quotas {
+            let mut pool: Vec<Candidate> = sorted
                 .iter()
-                .filter(|tag| !used_tags.contains(*tag))
-                .count();
-            if fresh_tags > 0 || items.len() + pool.len() <= target {
-                picked = Some(idx);
-                break;
-            }
+                .filter(|candidate| &candidate.platform == platform)
+                .cloned()
+                .collect();
+            pick_into(
+                &mut pool,
+                *quota as usize,
+                &mut items,
+                &mut used_tags,
+                &mut used_ids,
+                weak,
+            );
         }
-        let idx = picked.unwrap_or(0);
-        let candidate = pool.remove(idx);
         if items.len() < target {
-            for tag in &candidate.skill_tags {
-                used_tags.insert(tag.clone());
-            }
-            let kind = if candidate.attempted {
-                "review"
-            } else if candidate.normalized > 1700 && items.iter().all(|i| i.kind != "stretch") {
-                "stretch"
-            } else {
-                "practice"
-            };
-            let chinese_kind = match kind {
-                "review" => "复盘",
-                "stretch" => "拉伸",
-                _ => "练习",
-            };
-            let tags = if candidate.skill_tags.is_empty() {
-                weak.iter().take(2).cloned().collect::<Vec<_>>()
-            } else {
-                candidate.skill_tags.clone()
-            };
-            items.push(PickedItem {
-                problem_id: candidate.id.clone(),
-                kind: kind.to_string(),
-                reason: format!(
-                    "{chinese_kind}：{}（难度 {}，平台 {}），覆盖 {}，匹配当前薄弱点。",
-                    candidate.title,
-                    candidate.normalized,
-                    candidate.platform,
-                    tags.join("/")
-                ),
-                target_tags: tags,
-                expected_minutes: if candidate.normalized > 1800 { 70 } else { 45 },
-            });
+            let mut pool: Vec<Candidate> = sorted
+                .iter()
+                .filter(|candidate| !used_ids.contains(&candidate.id))
+                .cloned()
+                .collect();
+            let missing = target - items.len();
+            pick_into(
+                &mut pool,
+                missing,
+                &mut items,
+                &mut used_tags,
+                &mut used_ids,
+                weak,
+            );
         }
     }
-    let rationale = format!(
+
+    let mut rationale = format!(
         "根据当前 rating 与薄弱标签（{}）生成的确定性训练方案。优先选择未做过的题，并保留一道复盘或拉伸题。",
         weak.join("、")
     );
+    if !quotas.is_empty() {
+        rationale.push_str(&format!(
+            "\n\n> 题目来源：{}。",
+            quota_summary(quotas, &items)
+        ));
+    }
     (rationale, items)
 }
 
@@ -886,11 +1217,12 @@ pub fn spawn_refresh(
                 }
             }
         }
+        let quotas: Vec<PlatformQuota> = db.get_json("plan.quotas").await.unwrap_or_default();
         let req = GeneratePlanRequest {
             reason: Some("提交后自动刷新训练方案".into()),
             focus_tags: None,
             count: Some(8),
-            platforms: None,
+            platforms: (!quotas.is_empty()).then_some(quotas),
         };
         match generate_plan_for_refresh(&app, &db, &llm, req).await {
             Ok(plan) => {
@@ -926,6 +1258,231 @@ mod tests {
         }
     }
 
+    fn platform_candidate(id: &str, platform: &str, score: f64) -> Candidate {
+        Candidate {
+            id: id.to_string(),
+            platform: platform.into(),
+            title: id.to_string(),
+            rating: Some(1200),
+            normalized: 1200,
+            skill_tags: vec![format!("tag-{platform}")],
+            attempted: false,
+            score,
+        }
+    }
+
+    /// Regression: a 11k-problem Codeforces pool used to fill the single
+    /// distance-ordered query, so Luogu contributed 0 candidates and every
+    /// "洛谷 N 道" quota came back as "0/N 道".
+    #[tokio::test]
+    async fn small_platform_survives_a_huge_codeforces_pool() {
+        let dir = std::env::temp_dir().join(format!("icpc-plan-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let db = Db::open(&dir.join("test.db")).await.expect("db");
+        for index in 0..700 {
+            sqlx::query(
+                "INSERT INTO problems(id, platform, native_id, title, url, normalized_rating, tags_json, skill_tags_json, samples_json)
+                 VALUES(?1, 'codeforces', ?2, ?2, 'https://example.com', 1050, '[]', '[]', '[]')",
+            )
+            .bind(format!("cf:{index}"))
+            .bind(format!("C{index}"))
+            .execute(&db.pool)
+            .await
+            .expect("insert");
+        }
+        for index in 0..5 {
+            sqlx::query(
+                "INSERT INTO problems(id, platform, native_id, title, url, normalized_rating, tags_json, skill_tags_json, samples_json)
+                 VALUES(?1, 'luogu', ?2, ?2, 'https://example.com', 1500, '[]', '[]', '[]')",
+            )
+            .bind(format!("luogu:P{index}"))
+            .bind(format!("P{index}"))
+            .execute(&db.pool)
+            .await
+            .expect("insert");
+        }
+
+        let candidates = load_candidates(&db, 1053, &[]).await.expect("candidates");
+        let luogu = candidates.iter().filter(|c| c.platform == "luogu").count();
+        assert_eq!(luogu, 5, "Luogu must not be crowded out by Codeforces");
+        let pool = build_pool(candidates, &[("luogu".to_string(), 4)]);
+        assert!(pool.iter().filter(|c| c.platform == "luogu").count() >= 4);
+
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parses_platform_quotas_from_the_ui_payload() {
+        let req: GeneratePlanRequest = serde_json::from_value(json!({
+            "reason": "训练页手动生成",
+            "platforms": [
+                {"platform": "codeforces", "count": 4},
+                {"platform": "luogu", "count": 2}
+            ]
+        }))
+        .expect("camelCase payload");
+        let quotas = normalize_quotas(req.platforms.as_ref());
+        assert_eq!(quota_total(&quotas), 6);
+        assert_eq!(quotas[1], ("luogu".to_string(), 2));
+
+        // An explicit empty list means "no mix", not "missing".
+        let req: GeneratePlanRequest =
+            serde_json::from_value(json!({"platforms": []})).expect("empty list");
+        assert!(req.platforms.is_some());
+        assert!(normalize_quotas(req.platforms.as_ref()).is_empty());
+    }
+
+    #[test]
+    fn normalizes_platform_quotas() {
+        let quotas = normalize_quotas(Some(&vec![
+            PlatformQuota {
+                platform: " Codeforces ".into(),
+                count: 3,
+            },
+            PlatformQuota {
+                platform: "luogu".into(),
+                count: 2,
+            },
+            PlatformQuota {
+                platform: "codeforces".into(),
+                count: 1,
+            },
+            PlatformQuota {
+                platform: "nowhere".into(),
+                count: 5,
+            },
+            PlatformQuota {
+                platform: "atcoder".into(),
+                count: 0,
+            },
+        ]));
+        assert_eq!(
+            quotas,
+            vec![("codeforces".to_string(), 3), ("luogu".to_string(), 2)]
+        );
+
+        // Totals above the schema limit are trimmed largest-first.
+        let capped = normalize_quotas(Some(&vec![
+            PlatformQuota {
+                platform: "codeforces".into(),
+                count: 12,
+            },
+            PlatformQuota {
+                platform: "luogu".into(),
+                count: 12,
+            },
+        ]));
+        assert_eq!(quota_total(&capped), 12);
+        assert!(capped.iter().all(|(_, count)| *count >= 6));
+    }
+
+    #[test]
+    fn build_pool_keeps_requested_platforms() {
+        let mut candidates = Vec::new();
+        for index in 0..20 {
+            candidates.push(platform_candidate(
+                &format!("cf:{index}"),
+                "codeforces",
+                100.0,
+            ));
+        }
+        for index in 0..3 {
+            candidates.push(platform_candidate(&format!("luogu:P{index}"), "luogu", 1.0));
+        }
+        let pool = build_pool(
+            candidates,
+            &[("codeforces".to_string(), 2), ("luogu".to_string(), 2)],
+        );
+        let luogu = pool.iter().filter(|c| c.platform == "luogu").count();
+        assert_eq!(luogu, 3, "low-scoring platform must still reach the pool");
+        let codeforces = pool.iter().filter(|c| c.platform == "codeforces").count();
+        assert!(codeforces >= 10, "quota platforms get a 5x budget");
+        assert!(pool.len() <= 60);
+    }
+
+    #[test]
+    fn enforces_quotas_on_agent_output() {
+        let mut candidates = Vec::new();
+        for index in 0..4 {
+            candidates.push(platform_candidate(
+                &format!("cf:{index}"),
+                "codeforces",
+                10.0,
+            ));
+            candidates.push(platform_candidate(&format!("luogu:P{index}"), "luogu", 1.0));
+        }
+        let quotas = vec![("codeforces".to_string(), 2), ("luogu".to_string(), 2)];
+        let item = |id: &str| {
+            json!({
+                "problem_id": id,
+                "kind": "practice",
+                "reason": "覆盖边界情况",
+                "target_tags": ["dp"],
+                "expected_minutes": 45
+            })
+        };
+        // The agent ignores the quota and only returns Codeforces problems.
+        let value = json!({
+            "diagnosis": "边界处理不稳。",
+            "rationale": "先巩固边界。",
+            "items": [item("cf:0"), item("cf:1"), item("cf:2"), item("cf:3")]
+        });
+        let (rationale, items) =
+            normalize_payload(value, &candidates, 4, &quotas, &[]).expect("valid plan");
+        assert_eq!(items.len(), 4);
+        let codeforces = items.iter().filter(|i| i.platform == "codeforces").count();
+        let luogu = items.iter().filter(|i| i.platform == "luogu").count();
+        assert_eq!((codeforces, luogu), (2, 2));
+        assert!(rationale.contains("Codeforces 2/2 道"));
+        assert!(rationale.contains("洛谷 2/2 道"));
+    }
+
+    #[test]
+    fn reports_platform_shortfall() {
+        let candidates = vec![
+            platform_candidate("cf:0", "codeforces", 10.0),
+            platform_candidate("cf:1", "codeforces", 9.0),
+            platform_candidate("cf:2", "codeforces", 8.0),
+            platform_candidate("cf:3", "codeforces", 7.0),
+        ];
+        let quotas = vec![("codeforces".to_string(), 3), ("luogu".to_string(), 2)];
+        let value = json!({
+            "diagnosis": "诊断",
+            "rationale": "方案",
+            "items": []
+        });
+        let (rationale, items) =
+            normalize_payload(value, &candidates, 5, &quotas, &[]).expect("still valid");
+        assert_eq!(
+            items.len(),
+            4,
+            "shortfall is topped up from other platforms"
+        );
+        assert!(rationale.contains("洛谷 的候选题目不足"));
+        assert!(rationale.contains("实际安排 0/2 道"));
+    }
+
+    #[test]
+    fn deterministic_plan_honours_quotas() {
+        let candidates = vec![
+            platform_candidate("cf:0", "codeforces", 10.0),
+            platform_candidate("cf:1", "codeforces", 9.0),
+            platform_candidate("luogu:P0", "luogu", 8.0),
+            platform_candidate("luogu:P1", "luogu", 7.0),
+            platform_candidate("cf:2", "codeforces", 6.0),
+        ];
+        let quotas = vec![("codeforces".to_string(), 2), ("luogu".to_string(), 1)];
+        let (rationale, items) = deterministic_plan(&candidates, &["dp".to_string()], 3, &quotas);
+        assert_eq!(items.len(), 3);
+        assert_eq!(
+            items.iter().filter(|i| i.platform == "codeforces").count(),
+            2
+        );
+        assert_eq!(items.iter().filter(|i| i.platform == "luogu").count(), 1);
+        assert!(rationale.contains("题目来源"));
+    }
+
     #[test]
     fn requires_agent_diagnosis_and_at_least_four_items() {
         let candidates = vec![
@@ -948,7 +1505,8 @@ mod tests {
             "rationale": "先巩固边界。",
             "items": [item("cf:1"), item("cf:2"), item("cf:3"), item("cf:4")]
         });
-        let (rationale, items) = normalize_payload(valid, &candidates, 4).expect("valid plan");
+        let (rationale, items) =
+            normalize_payload(valid, &candidates, 4, &[], &[]).expect("valid plan");
         assert!(rationale.contains("Agent 诊断"));
         assert_eq!(items.len(), 4);
 
@@ -956,13 +1514,13 @@ mod tests {
             "rationale": "没有诊断",
             "items": [item("cf:1"), item("cf:2"), item("cf:3"), item("cf:4")]
         });
-        assert!(normalize_payload(missing_diagnosis, &candidates, 4).is_err());
+        assert!(normalize_payload(missing_diagnosis, &candidates, 4, &[], &[]).is_err());
 
         let too_short = json!({
             "diagnosis": "诊断",
             "rationale": "方案",
             "items": [item("cf:1")]
         });
-        assert!(normalize_payload(too_short, &candidates, 4).is_err());
+        assert!(normalize_payload(too_short, &candidates, 4, &[], &[]).is_err());
     }
 }

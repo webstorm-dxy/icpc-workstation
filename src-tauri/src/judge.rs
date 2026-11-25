@@ -503,7 +503,9 @@ fn make_diff(expected: &str, actual: &str) -> String {
     out
 }
 
-const BITS_SHIM: &str = r#"#pragma once
+/// Minimal stand-in for libstdc++'s `<bits/stdc++.h>` so clang builds and
+/// clangd diagnostics work on toolchains that do not ship the umbrella header.
+pub(crate) const BITS_SHIM: &str = r#"#pragma once
 #include <algorithm>
 #include <array>
 #include <bitset>

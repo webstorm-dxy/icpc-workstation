@@ -152,65 +152,111 @@ pub async fn submit(
         });
     }
 
-    if platform == "luogu" {
-        // Luogu's submit form lives in a tab/modal opened by the button.
-        let _ = automation
-            .eval_json(&platform, click_submit_tab(), 5_000)
-            .await;
-        tokio::time::sleep(Duration::from_millis(1_400)).await;
-    }
-
     let language = req.language.clone().unwrap_or_default();
-    let fill = fill_script(&platform, &req.code, &native_id, &language);
-    let fill_result = automation.eval_json(&platform, &fill, 20_000).await?;
-    if fill_result.get("ok").and_then(|v| v.as_bool()) != Some(true) {
-        let detail = fill_result
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("页面结构可能已变化");
-        automation
-            .needs_human(
-                app,
-                &platform,
-                format!("无法自动填写代码：{detail}"),
-                "请在右侧页面中粘贴代码并手动提交。应用会在你点击“保存结果”后尝试读取判定。",
-            )
-            .await;
-        return Ok(SubmitResultDto {
-            needs_human: true,
-            message: format!("无法自动填写代码：{detail}"),
-            submission: None,
-            automation_status: "manual_fill".into(),
-        });
-    }
-    let used_language = fill_result
-        .get("language")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .filter(|s| !s.is_empty())
-        .or_else(|| Some(language.clone()).filter(|s| !s.is_empty()));
 
-    if !auto {
-        automation
-            .needs_human(
-                app,
-                &platform,
-                "代码已填入，请确认后提交",
-                "检查语言与代码后在右侧页面点击提交；提交完成后回到应用点击“我已提交，读取结果”。",
-            )
-            .await;
-        return Ok(SubmitResultDto {
-            needs_human: true,
-            message: "代码已填入，请在页面中确认并提交".into(),
-            submission: None,
-            automation_status: "waiting_for_manual_submit".into(),
-        });
-    }
+    // Luogu's own SPA posts to `/fe/api/problem/submit/{pid}`; its editor is
+    // mounted asynchronously and cannot be filled reliably from a script, so the
+    // unattended path talks to the same endpoint instead of the DOM.
+    let mut luogu_rid: Option<i64> = None;
+    let used_language: Option<String> = if platform == "luogu" && auto {
+        let outcome = submit_luogu(automation, &native_id, &req.code, &language).await;
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                // A rejected POST must not leave the panel claiming it is still
+                // filling the form.
+                automation
+                    .set_status(app, &platform, "error", err.message.clone())
+                    .await;
+                return Err(err);
+            }
+        };
+        match outcome {
+            LuoguSubmit::Submitted { rid, language } => {
+                luogu_rid = Some(rid);
+                Some(language)
+            }
+            LuoguSubmit::NeedsHuman { message, hint } => {
+                automation
+                    .needs_human(app, &platform, &message, &hint)
+                    .await;
+                return Ok(SubmitResultDto {
+                    needs_human: true,
+                    message,
+                    submission: None,
+                    automation_status: "needs_human".into(),
+                });
+            }
+        }
+    } else {
+        if platform == "luogu" {
+            // The submit editor lives in a modal opened by the button; keep
+            // retrying the fill while it mounts instead of guessing a delay.
+            let _ = automation
+                .eval_json(&platform, click_submit_tab(), 5_000)
+                .await;
+        }
+        let fill = fill_script(&platform, &req.code, &native_id, &language);
+        let mut fill_result = automation.eval_json(&platform, &fill, 20_000).await?;
+        let mut attempts = 0;
+        while platform == "luogu"
+            && fill_result.get("ok").and_then(|v| v.as_bool()) != Some(true)
+            && attempts < 8
+        {
+            attempts += 1;
+            tokio::time::sleep(Duration::from_millis(750)).await;
+            fill_result = automation.eval_json(&platform, &fill, 20_000).await?;
+        }
+        if fill_result.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+            let detail = fill_result
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("页面结构可能已变化");
+            automation
+                .needs_human(
+                    app,
+                    &platform,
+                    format!("无法自动填写代码：{detail}"),
+                    "请在右侧页面中粘贴代码并手动提交。应用会在你点击“保存结果”后尝试读取判定。",
+                )
+                .await;
+            return Ok(SubmitResultDto {
+                needs_human: true,
+                message: format!("无法自动填写代码：{detail}"),
+                submission: None,
+                automation_status: "manual_fill".into(),
+            });
+        }
+        if !auto {
+            automation
+                .needs_human(
+                    app,
+                    &platform,
+                    "代码已填入，请确认后提交",
+                    "检查语言与代码后在右侧页面点击提交；提交完成后回到应用点击“我已提交，读取结果”。",
+                )
+                .await;
+            return Ok(SubmitResultDto {
+                needs_human: true,
+                message: "代码已填入，请在页面中确认并提交".into(),
+                submission: None,
+                automation_status: "waiting_for_manual_submit".into(),
+            });
+        }
+        fill_result
+            .get("language")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| Some(language.clone()).filter(|s| !s.is_empty()))
+    };
 
     let since = Utc::now().timestamp() - 3;
-    automation
-        .eval_json(&platform, click_submit_script(&platform), 10_000)
-        .await?;
+    if luogu_rid.is_none() {
+        automation
+            .eval_json(&platform, click_submit_script(&platform), 10_000)
+            .await?;
+    }
     automation
         .set_status(app, &platform, "judging", "已提交，正在等待判定…")
         .await;
@@ -226,7 +272,7 @@ pub async fn submit(
             automation_status: "needs_human".into(),
         });
     }
-    match poll_verdict(app, db, automation, &platform, &native_id, since, 150).await {
+    match poll_verdict(db, automation, &platform, &native_id, since, 150, luogu_rid).await {
         Ok(info) => {
             let submission_id = insert_captured(
                 db,
@@ -290,7 +336,7 @@ pub async fn capture_verdict(
     let since = req
         .since_epoch
         .unwrap_or_else(|| Utc::now().timestamp() - 900);
-    let info = poll_verdict(app, db, automation, &platform, &native_id, since, 120).await?;
+    let info = poll_verdict(db, automation, &platform, &native_id, since, 120, None).await?;
     let submission_id = insert_captured(
         db,
         &platform,
@@ -624,14 +670,20 @@ const LUOGU_FILL: &str = r#"(() => {
       el.dispatchEvent(new Event('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
     };
-    const selects = Array.from(document.querySelectorAll('select'));
-    const langSelect = selects.find(s => Array.from(s.options).some(o => /C\+\+/.test(o.text)));
+    const langSelect = Array.from(document.querySelectorAll('select'))
+      .find(s => Array.from(s.options).some(o => /C\+\+/.test(o.text)));
     let chosen = '';
+    let lang = 0;
     if (langSelect) {
-      const opt = Array.from(langSelect.options).find(o => /C\+\+17/.test(o.text)) || Array.from(langSelect.options).find(o => /C\+\+20/.test(o.text)) || Array.from(langSelect.options).find(o => /C\+\+/.test(o.text));
+      const opts = Array.from(langSelect.options);
+      const opt = opts.find(o => /C\+\+17/.test(o.text))
+        || opts.find(o => /C\+\+20/.test(o.text))
+        || opts.find(o => /C\+\+14/.test(o.text))
+        || opts.find(o => /C\+\+/.test(o.text));
       if (opt) {
         langSelect.value = opt.value;
         chosen = opt.text.trim();
+        lang = Number(opt.value) || 0;
         langSelect.dispatchEvent(new Event('change', { bubbles: true }));
       }
     }
@@ -644,25 +696,203 @@ const LUOGU_FILL: &str = r#"(() => {
     }
     if (window.ace) {
       const aceNode = document.querySelector('.ace_editor');
-      if (aceNode) { window.ace.edit(aceNode).setValue(p.code, -1); editor = 'ace'; }
+      if (aceNode && window.ace.edit) { window.ace.edit(aceNode).setValue(p.code, -1); editor = 'ace'; }
     }
-    const ta = document.querySelector('textarea');
-    if (ta) { setVal(ta, p.code); editor = editor === 'none' ? 'textarea' : editor; }
-    if (editor === 'none') return JSON.stringify({ ok: false, error: '没有找到洛谷代码编辑器，请在页面中手动粘贴' });
-    return JSON.stringify({ ok: true, language: chosen || p.language, editor });
+    if (editor === 'none') {
+      const area = Array.from(document.querySelectorAll('textarea')).find(t => !t.readOnly);
+      if (area) { setVal(area, p.code); editor = 'textarea'; }
+    }
+    if (editor === 'none') {
+      const editable = document.querySelector('[contenteditable="true"]');
+      if (editable) {
+        editable.focus();
+        const range = document.createRange();
+        range.selectNodeContents(editable);
+        const selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+        document.execCommand('insertText', false, p.code);
+        editor = 'contenteditable';
+      }
+    }
+    if (editor === 'none') return JSON.stringify({ ok: false, error: '编辑器尚未出现（页面可能仍在加载）' });
+    return JSON.stringify({ ok: true, language: chosen || p.language, lang, editor });
   } catch (e) {
     return JSON.stringify({ ok: false, error: String(e) });
   }
 })()"#;
 
+enum LuoguSubmit {
+    Submitted { rid: i64, language: String },
+    NeedsHuman { message: String, hint: String },
+}
+
+/// Luogu language ids, from `/_lfe/config` → `CodeLanguage` (12 = C++17, the
+/// default this app submits). Matching is on the language string so a future
+/// dialect switch only needs to pass e.g. `gnu++20` through.
+fn luogu_language(language: &str) -> (i64, &'static str) {
+    let lower = language.to_ascii_lowercase();
+    if lower.contains("23") {
+        (34, "C++23")
+    } else if lower.contains("20") {
+        (27, "C++20")
+    } else if lower.contains("14") {
+        (11, "C++14")
+    } else if lower.contains("11") {
+        (4, "C++11")
+    } else if lower.contains("98") {
+        (3, "C++98")
+    } else {
+        (12, "C++17")
+    }
+}
+
+/// Success payloads carry `rid`; failures use several historical envelopes
+/// (`status`/`errorMessage`, `code`/`message`, `errorType`) and sometimes plain
+/// HTML when the session expired.
+fn luogu_submit_error(payload: &Value) -> Option<String> {
+    if payload.get("rid").is_some() {
+        return None;
+    }
+    for key in ["errorMessage", "message", "data", "errorType"] {
+        if let Some(text) = payload
+            .get(key)
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            return Some(crate::util::truncate_chars(text, 160));
+        }
+    }
+    match payload {
+        Value::Null => Some("洛谷没有返回任何内容".into()),
+        Value::String(text) => Some(crate::util::truncate_chars(text.trim(), 160)),
+        other => {
+            if let Some(raw) = other.get("__raw").and_then(|value| value.as_str()) {
+                return Some(crate::util::truncate_chars(raw.trim(), 160));
+            }
+            Some(crate::util::truncate_chars(&other.to_string(), 160))
+        }
+    }
+}
+
+/// Submits through the endpoint Luogu's own SPA uses:
+/// `POST /fe/api/problem/submit/{pid}` with the page CSRF token and
+/// `{ code, lang, enableO2 }`; the response carries the record id.
+async fn submit_luogu(
+    automation: &AutomationManager,
+    native_id: &str,
+    code: &str,
+    language: &str,
+) -> AppResult<LuoguSubmit> {
+    let (lang_id, lang_name) = luogu_language(language);
+    let body = json!({ "code": code, "lang": lang_id, "enableO2": 1 }).to_string();
+    let response = automation
+        .post_json_in_page(
+            "luogu",
+            &format!("/fe/api/problem/submit/{native_id}"),
+            &body,
+            30_000,
+        )
+        .await?;
+
+    if response.get("redirected").and_then(|value| value.as_bool()) == Some(true) {
+        return Ok(LuoguSubmit::NeedsHuman {
+            message: "洛谷登录已失效".into(),
+            hint: "请在右侧页面重新登录洛谷，然后重新提交。".into(),
+        });
+    }
+    let status = response
+        .get("status")
+        .and_then(|value| value.as_i64())
+        .unwrap_or(0);
+    if status == 401 || status == 403 {
+        return Ok(LuoguSubmit::NeedsHuman {
+            message: "洛谷拒绝了本次提交".into(),
+            hint: "请在右侧页面完成人机验证或重新登录后再试。".into(),
+        });
+    }
+    let payload = response.get("body").cloned().unwrap_or(Value::Null);
+    if let Some(message) = luogu_submit_error(&payload) {
+        return Err(AppError::new(
+            "E_SUBMIT_REJECTED",
+            format!("洛谷拒绝提交：{message}"),
+        ));
+    }
+    let rid = payload
+        .get("rid")
+        .and_then(|value| {
+            value
+                .as_i64()
+                .or_else(|| value.as_str().and_then(|text| text.parse::<i64>().ok()))
+        })
+        .ok_or_else(|| AppError::new("E_SUBMIT_REJECTED", "洛谷没有返回提交记录编号"))?;
+    Ok(LuoguSubmit::Submitted {
+        rid,
+        language: lang_name.to_string(),
+    })
+}
+
+/// Reads one record by id; the submit endpoint already told us exactly which
+/// record to watch, so no time-window matching is needed.
+async fn poll_luogu_record(
+    automation: &AutomationManager,
+    rid: i64,
+) -> AppResult<Option<VerdictInfo>> {
+    let value = automation
+        .fetch_json_in_page("luogu", &format!("/record/{rid}?_contentOnly=1"), 20_000)
+        .await?;
+    let record = value
+        .get("currentData")
+        .and_then(|current| current.get("record"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    if !record.is_object() {
+        return Ok(None);
+    }
+    let status = record
+        .get("status")
+        .and_then(|value| value.as_i64())
+        .unwrap_or(0);
+    let verdict = verdict_from_luogu(status);
+    if verdict == "JUDGING" {
+        return Ok(None);
+    }
+    let submit_time = record
+        .get("submitTime")
+        .and_then(|value| value.as_i64())
+        .unwrap_or_else(|| Utc::now().timestamp());
+    let epoch = if submit_time > 1_000_000_000_000 {
+        submit_time / 1000
+    } else {
+        submit_time
+    };
+    let language = record
+        .get("language")
+        .and_then(|value| value.get("name"))
+        .and_then(|value| value.as_str())
+        .or_else(|| record.get("language").and_then(|value| value.as_str()))
+        .or_else(|| record.get("languageName").and_then(|value| value.as_str()))
+        .map(|text| text.to_string());
+    Ok(Some(VerdictInfo {
+        native_id: rid.to_string(),
+        verdict,
+        language,
+        time_ms: record.get("time").and_then(|value| value.as_i64()),
+        memory_kb: record.get("memory").and_then(|value| value.as_i64()),
+        submitted_at: epoch_to_iso(epoch),
+        raw: record,
+    }))
+}
+
 async fn poll_verdict(
-    app: &AppHandle,
     db: &Db,
     automation: &AutomationManager,
     platform: &str,
     native_id: &str,
     since_epoch: i64,
     timeout_secs: u64,
+    luogu_rid: Option<i64>,
 ) -> AppResult<VerdictInfo> {
     let started = tokio::time::Instant::now();
     let deadline = started + Duration::from_secs(timeout_secs);
@@ -670,7 +900,10 @@ async fn poll_verdict(
         let result = match platform {
             "codeforces" => poll_codeforces(db, native_id, since_epoch).await,
             "atcoder" => poll_atcoder(db, native_id, since_epoch).await,
-            "luogu" => poll_luogu(app, db, automation, native_id, since_epoch).await,
+            "luogu" => match luogu_rid {
+                Some(rid) => poll_luogu_record(automation, rid).await,
+                None => poll_luogu(db, automation, native_id, since_epoch).await,
+            },
             _ => Err(AppError::invalid("未知平台")),
         };
         match result {
@@ -833,13 +1066,11 @@ async fn poll_atcoder(
 }
 
 async fn poll_luogu(
-    app: &AppHandle,
     db: &Db,
     automation: &AutomationManager,
     native_id: &str,
     since_epoch: i64,
 ) -> AppResult<Option<VerdictInfo>> {
-    let _ = app;
     let account = account_for(db, "luogu").await?;
     let uid = account
         .uid
@@ -903,4 +1134,51 @@ async fn poll_luogu(
         }));
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn luogu_language_ids_follow_the_dialect() {
+        assert_eq!(luogu_language("cpp"), (12, "C++17"));
+        assert_eq!(luogu_language("gnu++17"), (12, "C++17"));
+        assert_eq!(luogu_language("gnu++20"), (27, "C++20"));
+        assert_eq!(luogu_language("gnu++23"), (34, "C++23"));
+        assert_eq!(luogu_language("c++14"), (11, "C++14"));
+    }
+
+    #[test]
+    fn luogu_success_is_detected_by_rid() {
+        assert_eq!(luogu_submit_error(&json!({ "rid": 123456 })), None);
+        assert_eq!(
+            luogu_submit_error(&json!({ "rid": "123456" })),
+            None,
+            "string ids must count as success too"
+        );
+    }
+
+    #[test]
+    fn luogu_errors_cover_every_envelope() {
+        let legacy = luogu_submit_error(&json!({ "status": 400, "errorMessage": "提交过于频繁" }));
+        assert!(legacy.unwrap().contains("提交过于频繁"));
+
+        let newer = luogu_submit_error(&json!({ "code": 401, "message": "请先登录" }));
+        assert!(newer.unwrap().contains("请先登录"));
+
+        let raw = luogu_submit_error(&json!({ "__raw": "<html>login</html>" }));
+        assert!(raw.unwrap().contains("login"));
+
+        assert!(luogu_submit_error(&Value::Null).is_some());
+    }
+
+    #[test]
+    fn luogu_submit_body_carries_language_and_o2() {
+        let (lang, _) = luogu_language("gnu++17");
+        let body = json!({ "code": "int main(){}", "lang": lang, "enableO2": 1 }).to_string();
+        let parsed: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["lang"], json!(12));
+        assert_eq!(parsed["enableO2"], json!(1));
+    }
 }

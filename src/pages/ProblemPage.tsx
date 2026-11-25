@@ -35,6 +35,13 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
 import { api, errText } from "../lib/api";
 import { cppCompletion } from "../lib/cppCompletion";
+import { cppEditorBase } from "../lib/editorSetup";
+import {
+  lspCapabilities,
+  lspExtensions,
+  useLspConnection,
+  useLspServers,
+} from "../lib/lsp";
 import {
   difficultyLabel,
   failureCategoryLabel,
@@ -44,6 +51,7 @@ import {
 } from "../lib/format";
 import { MarkdownView } from "../lib/markdown";
 import { useAppStore } from "../store";
+import { LspStatusTag } from "../components/LspStatus";
 import { EmptyState, PlatformTag, VerdictTag } from "../components/ui";
 import type { Analysis, JudgeResult, Submission } from "../types";
 
@@ -150,6 +158,7 @@ export default function ProblemPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const settings = useAppStore((s) => s.settings);
+  const setSettings = useAppStore((s) => s.setSettings);
   const requestAutomation = useAppStore((s) => s.requestAutomation);
   const setAutomationOpen = useAppStore((s) => s.setAutomationOpen);
   const setAutomationContext = useAppStore((s) => s.setAutomationContext);
@@ -172,6 +181,23 @@ export default function ProblemPage() {
   const [lastSubmission, setLastSubmission] = useState<Submission | null>(null);
   const [tab, setTab] = useState("tests");
   const saveTimer = useRef<number | null>(null);
+
+  // Language server: one clangd per problem + dialect, shared by the editor
+  // across remounts. The editor keeps working without it (local completion).
+  const lspEnabled = settings?.lspEnabled ?? true;
+  const lspServerPath = settings?.lspServerPath ?? null;
+  const {
+    status: lspStatus,
+    connection: lspConnection,
+    restart: restartLsp,
+  } = useLspConnection({ enabled: lspEnabled, problemId, standard, serverPath: lspServerPath });
+  const { servers: lspServers, refresh: refreshLspServers } = useLspServers();
+  const lspCaps = useMemo(() => lspCapabilities(lspStatus.capabilities), [lspStatus.capabilities]);
+  const editorExtensions = useMemo(() => {
+    const base = cppEditorBase();
+    if (lspConnection) return [...base, ...lspExtensions(lspConnection)];
+    return [...base, autocompletion({ override: [cppCompletion] })];
+  }, [lspConnection]);
 
   const problem = useQuery({
     queryKey: ["problem", problemId],
@@ -267,6 +293,24 @@ export default function ProblemPage() {
     queryClient.invalidateQueries({ queryKey: ["plan"] });
   }, [submitResult, problemId, setSubmitResult, queryClient]);
 
+  const reloadStatement = async () => {
+    try {
+      await api.getProblem(problemId, true);
+      await queryClient.invalidateQueries({ queryKey: ["problem", problemId] });
+      message.success("题面已重新解析");
+    } catch (error) {
+      message.error(errText(error));
+    }
+  };
+
+  const patchLspSettings = async (patch: { lspEnabled?: boolean; lspServerPath?: string | null }) => {
+    try {
+      setSettings(await api.updateSettings(patch));
+    } catch (error) {
+      message.error(errText(error));
+    }
+  };
+
   const run = async () => {
     if (!problem.data) return;
     if (!problem.data.samples.length) {
@@ -300,14 +344,16 @@ export default function ProblemPage() {
     setAutomationContext({
       problemId,
       code,
-      language: "cpp",
+      language: standard,
       since: Math.floor(Date.now() / 1000) - 5,
     });
     try {
       const result = await api.submitSolution({
         problemId,
         code,
-        language: "cpp",
+        // Carries the editor's dialect (e.g. `gnu++20`); each platform maps it
+        // to its own language id when filling the form.
+        language: standard,
         autoSubmit,
       });
       if (result.submission) {
@@ -456,7 +502,7 @@ export default function ProblemPage() {
             <Button
               size="small"
               onClick={() => {
-                problem.refetch();
+                void reloadStatement();
                 requestAutomation(current.platform, current.url);
               }}
             >
@@ -587,7 +633,7 @@ export default function ProblemPage() {
             description="点击下方按钮在自动化面板打开原题页，或重新获取题面。"
             action={
               <Space>
-                <Button size="small" onClick={() => problem.refetch()}>
+                <Button size="small" onClick={() => void reloadStatement()}>
                   <ReloadOutlined /> 重新获取
                 </Button>
                 <Button
@@ -641,6 +687,16 @@ export default function ProblemPage() {
                 { value: "gnu++23", label: "GNU++23" },
               ]}
             />
+            <LspStatusTag
+              status={lspStatus}
+              servers={lspServers}
+              serverPath={lspServerPath}
+              capabilities={lspCaps}
+              onSelectServer={(path) => patchLspSettings({ lspServerPath: path })}
+              onRestart={restartLsp}
+              onRefreshServers={() => void refreshLspServers(true)}
+              onToggle={() => patchLspSettings({ lspEnabled: !lspEnabled })}
+            />
           </Space>
           <span className="grow" />
           <Space wrap>
@@ -678,7 +734,7 @@ export default function ProblemPage() {
             value={code}
             height="100%"
             theme={oneDark}
-            extensions={[cpp(), autocompletion({ override: [cppCompletion] })]}
+            extensions={editorExtensions}
             onChange={(value) => setCode(value)}
             basicSetup={{
               lineNumbers: true,

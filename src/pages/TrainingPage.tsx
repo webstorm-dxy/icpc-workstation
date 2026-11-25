@@ -3,6 +3,7 @@ import {
   Button,
   Card,
   Empty,
+  InputNumber,
   Modal,
   Progress,
   Space,
@@ -10,33 +11,72 @@ import {
   Tooltip,
 } from "antd";
 import { ReloadOutlined, RocketOutlined, SyncOutlined } from "@ant-design/icons";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { api, errText } from "../lib/api";
 import { MarkdownView } from "../lib/markdown";
 import { useAppStore } from "../store";
-import { difficultyLabel, planKindLabel } from "../lib/format";
+import { difficultyLabel, planKindLabel, platformName } from "../lib/format";
 import { EmptyState, PageHeader, PlatformTag } from "../components/ui";
 import type { PlanItem } from "../types";
+
+const PLAN_PLATFORMS = ["codeforces", "atcoder", "luogu"] as const;
+const MIN_PLAN_SIZE = 4;
+const MAX_PLAN_SIZE = 12;
 
 export default function TrainingPage() {
   const { message } = App.useApp();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [generating, setGenerating] = useState(false);
+  const [quota, setQuota] = useState<Record<string, number> | null>(null);
   const openPlanAgent = useAppStore((s) => s.openPlanAgent);
   const applyPlanAgent = useAppStore((s) => s.applyPlanAgent);
   const plan = useQuery({ queryKey: ["plan"], queryFn: api.getActivePlan });
 
+  // Start from the current plan's platform mix so "generate again" keeps it.
+  useEffect(() => {
+    if (quota !== null) return;
+    const items = plan.data?.items;
+    if (!items) return;
+    const counts: Record<string, number> = {};
+    for (const item of items) {
+      counts[item.platform] = (counts[item.platform] ?? 0) + 1;
+    }
+    setQuota(counts);
+  }, [plan.data, quota]);
+
+  const quotaByPlatform = quota ?? {};
+  const quotaTotal = PLAN_PLATFORMS.reduce(
+    (sum, platform) => sum + (quotaByPlatform[platform] ?? 0),
+    0,
+  );
+  const setPlatformCount = (platform: string, value: number | null) => {
+    setQuota({ ...quotaByPlatform, [platform]: Math.max(0, Math.min(MAX_PLAN_SIZE, value ?? 0)) });
+  };
+
   const generate = async () => {
+    if (quotaTotal > 0 && quotaTotal < MIN_PLAN_SIZE) {
+      message.warning(`至少选择 ${MIN_PLAN_SIZE} 道题，或者把各平台都设为 0 交给 Agent 自由挑选`);
+      return;
+    }
+    if (quotaTotal > MAX_PLAN_SIZE) {
+      message.warning(`一次最多 ${MAX_PLAN_SIZE} 道题`);
+      return;
+    }
+    const platforms = PLAN_PLATFORMS.map((platform) => ({
+      platform,
+      count: quotaByPlatform[platform] ?? 0,
+    })).filter((item) => item.count > 0);
     openPlanAgent();
     setGenerating(true);
     message.loading({ content: "Agent 正在分析提交、代码与能力画像…", key: "plan" });
     try {
       await api.generatePlan({
         reason: "训练页手动生成",
-        count: 8,
+        count: platforms.length ? undefined : 8,
+        platforms,
       });
       message.success({ content: "训练计划已更新", key: "plan" });
       await queryClient.invalidateQueries({ queryKey: ["plan"] });
@@ -50,10 +90,15 @@ export default function TrainingPage() {
     }
   };
 
+  const mixLabel = PLAN_PLATFORMS.filter((platform) => (quotaByPlatform[platform] ?? 0) > 0)
+    .map((platform) => `${platformName(platform)} ${quotaByPlatform[platform]} 道`)
+    .join("、");
+
   const refresh = () => {
     Modal.confirm({
       title: "重新生成训练计划？",
       content:
+        (mixLabel ? `将按 ${mixLabel} 的配额选题。` : "本次不限来源平台，由 Agent 自由挑选。") +
         "Agent 会先分析最近提交、可用的提交代码与既有分析，形成诊断后再挑选新题目，并替换当前 active 计划。历史计划会保留。",
       okText: "重新生成",
       cancelText: "取消",
@@ -95,6 +140,38 @@ export default function TrainingPage() {
           </Space>
         }
       />
+
+      <Card
+        className="panel mb-14"
+        size="small"
+        title="题目来源"
+        extra={
+          <span className="muted tiny">
+            {quotaTotal > 0 ? `共 ${quotaTotal} 题` : "不限平台"}
+          </span>
+        }
+      >
+        <div className="flex between center wrap gap-12">
+          <Space wrap size={16}>
+            {PLAN_PLATFORMS.map((platform) => (
+              <Space key={platform} size={6}>
+                <PlatformTag platform={platform} />
+                <InputNumber
+                  size="small"
+                  min={0}
+                  max={MAX_PLAN_SIZE}
+                  value={quotaByPlatform[platform] ?? 0}
+                  onChange={(value) => setPlatformCount(platform, value)}
+                  style={{ width: 70 }}
+                />
+              </Space>
+            ))}
+          </Space>
+          <span className="muted tiny">
+            按平台分配题数，生成时各平台严格按配额出题；全部为 0 时由 Agent 自由挑选（默认 8 题）。
+          </span>
+        </div>
+      </Card>
 
       {plan.isLoading ? (
         <div style={{ padding: 60, textAlign: "center" }}>

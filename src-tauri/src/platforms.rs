@@ -11,7 +11,9 @@ use regex::Regex;
 use scraper::{Html, Selector};
 use serde_json::{Value, json};
 use sqlx::Row;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 pub const PLATFORMS: [&str; 3] = ["codeforces", "atcoder", "luogu"];
@@ -869,6 +871,10 @@ async fn sync_luogu(
     }
 
     emit_progress(app, "luogu", "submissions", "读取洛谷提交记录…", 45.0);
+    // Tag ids only mean something through `/_lfe/tags`; without it the UI shows
+    // `tag-45` instead of 图论/并查集.
+    let tag_names = luogu_tag_names(app, automation).await;
+    repair_placeholder_tags(app, automation, db, true).await;
     // Lentille returns 20 records per page. Use the actual page size to cover
     // the configured depth instead of assuming a 50-row page.
     let mut per_page = 20i64;
@@ -964,7 +970,10 @@ async fn sync_luogu(
                 raw: record.clone(),
             });
             if !title.is_empty() {
-                let tags = extract_tags(record.get("problem"));
+                let tags = record
+                    .get("problem")
+                    .map(|problem| luogu_tags(problem, &tag_names))
+                    .unwrap_or_default();
                 let _ = upsert_problems(
                     db,
                     &[ProblemSeed {
@@ -1055,7 +1064,7 @@ async fn sync_luogu(
                 continue;
             }
             let difficulty = problem.get("difficulty").and_then(|v| v.as_i64());
-            let tags = extract_tags(Some(&problem));
+            let tags = luogu_tags(&problem, &tag_names);
             pool.push(ProblemSeed {
                 id: format!("luogu:{pid}"),
                 platform: "luogu".into(),
@@ -1170,25 +1179,6 @@ async fn luogu_fetch(
     Ok(value)
 }
 
-pub fn extract_tags(problem: Option<&Value>) -> Vec<String> {
-    let Some(problem) = problem else {
-        return vec![];
-    };
-    let mut tags = Vec::new();
-    if let Some(arr) = problem.get("tags").and_then(|v| v.as_array()) {
-        for tag in arr {
-            if let Some(name) = tag.get("name").and_then(|v| v.as_str()) {
-                tags.push(name.to_string());
-            } else if let Some(name) = tag.as_str() {
-                tags.push(name.to_string());
-            } else if let Some(id) = tag.as_i64() {
-                tags.push(format!("tag-{id}"));
-            }
-        }
-    }
-    tags
-}
-
 pub fn luogu_normalized(difficulty: Option<i64>) -> Option<i64> {
     difficulty.map(|d| match d.clamp(1, 7) {
         1 => 800,
@@ -1203,7 +1193,12 @@ pub fn luogu_normalized(difficulty: Option<i64>) -> Option<i64> {
 
 pub fn skill_tags_for(platform: &str, tags: &[String]) -> Vec<String> {
     let _ = platform;
-    tags.iter().map(|tag| map_skill_tag(tag)).collect()
+    tags.iter()
+        .map(|tag| map_skill_tag(tag))
+        // Tags outside the ASCII dictionary used to collapse to "" and would
+        // then create a bogus skill profile keyed by the empty string.
+        .filter(|tag| !tag.is_empty())
+        .collect()
 }
 
 fn map_skill_tag(tag: &str) -> String {
@@ -1249,8 +1244,10 @@ fn canonical_tag(tag: &str) -> String {
     tag.trim()
         .to_ascii_lowercase()
         .replace([' ', '_'], "-")
+        // Keep non-ASCII letters: Luogu tag names are Chinese, and the old
+        // ASCII-only filter turned every one of them into an empty tag.
         .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .filter(|c| c.is_alphanumeric() || *c == '-')
         .collect()
 }
 
@@ -1367,6 +1364,7 @@ pub async fn fetch_problem(
     db: &Db,
     automation: &AutomationManager,
     problem_id: &str,
+    refresh: bool,
 ) -> AppResult<ProblemDto> {
     let row = sqlx::query("SELECT * FROM problems WHERE id = ?1")
         .bind(problem_id)
@@ -1376,12 +1374,27 @@ pub async fn fetch_problem(
     let platform: String = row.get("platform");
     let native_id: String = row.get("native_id");
     let current_statement: Option<String> = row.get("statement_md");
-    if current_statement.as_deref().unwrap_or("").trim().is_empty() {
-        match platform.as_str() {
-            "codeforces" => fetch_codeforces_statement(app, db, problem_id, &native_id).await?,
-            "atcoder" => fetch_atcoder_statement(app, db, problem_id, &native_id).await?,
-            "luogu" => fetch_luogu_statement(app, db, automation, problem_id, &native_id).await?,
-            _ => {}
+    let tags_json: String = row.get("tags_json");
+    let empty = current_statement.as_deref().unwrap_or("").trim().is_empty();
+    // Older Luogu rows kept the rendered page instead of the statement fields,
+    // and their tags are still `tag-<id>`; heal them on open.
+    let stale = platform == "luogu"
+        && luogu_statement_needs_refresh(current_statement.as_deref(), &tags_json);
+    if refresh || empty || stale {
+        let outcome = match platform.as_str() {
+            "codeforces" => fetch_codeforces_statement(app, db, problem_id, &native_id).await,
+            "atcoder" => fetch_atcoder_statement(app, db, problem_id, &native_id).await,
+            "luogu" => fetch_luogu_statement(app, db, automation, problem_id, &native_id).await,
+            _ => Ok(()),
+        };
+        if let Err(err) = outcome {
+            // An automatic heal must not turn a readable (if stale) statement
+            // into an error page; an explicit refresh or a missing statement
+            // still reports the failure.
+            if refresh || empty {
+                return Err(err);
+            }
+            tracing::warn!("rebuild statement failed for {problem_id}: {}", err.message);
         }
     }
     problem_dto(db, problem_id).await
@@ -1533,6 +1546,329 @@ async fn fetch_atcoder_statement(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Luogu statement, limits and tags
+//
+// `GET /problem/{pid}?_contentOnly=1` returns the statement as separate
+// markdown fields. Scraping the rendered page instead picks up the whole Vue
+// shell (navigation, buttons, sample boxes) with the formulas and structure
+// lost, which is why the editor used to show one long paragraph.
+// ---------------------------------------------------------------------------
+
+fn inline_html_to_markdown(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('<') {
+        out.push_str(&rest[..start]);
+        let tail = &rest[start..];
+        let Some(end) = tail.find('>') else {
+            out.push_str(tail);
+            return out;
+        };
+        let tag = &tail[..=end];
+        let lower = tag.to_ascii_lowercase();
+        if lower.starts_with("<img") {
+            if let Some(src) = attribute_value(tag, "src") {
+                out.push_str(&format!("![]({src})"));
+            }
+        } else if lower.starts_with("<br") {
+            out.push('\n');
+        } else {
+            out.push_str(tag);
+        }
+        rest = &tail[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn attribute_value(tag: &str, name: &str) -> Option<String> {
+    let lower = tag.to_ascii_lowercase();
+    let index = lower.find(&format!("{name}="))?;
+    let after = &tag[index + name.len() + 1..];
+    let quote = after.chars().next()?;
+    if quote == '"' || quote == '\'' {
+        let value = &after[1..];
+        let end = value.find(quote)?;
+        Some(value[..end].trim().to_string())
+    } else {
+        let end = after
+            .find(|c: char| c.is_whitespace() || c == '>')
+            .unwrap_or(after.len());
+        Some(after[..end].trim().to_string())
+    }
+}
+
+/// Headings follow the order Luogu itself renders.
+///
+/// The fields live under `problem.content` as `background` / `description` /
+/// `formatI` / `formatO` / `hint`; older exports also carried them at the top
+/// level as `inputFormat` / `outputFormat`, so both shapes are accepted.
+pub fn luogu_statement_markdown(problem: &Value) -> String {
+    let content = problem
+        .get("content")
+        .filter(|value| value.is_object())
+        .unwrap_or(problem);
+    let field = |keys: &[&str]| {
+        keys.iter().find_map(|key| {
+            content
+                .get(*key)
+                .or_else(|| problem.get(*key))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+        })
+    };
+    let mut out = String::new();
+    for (heading, keys) in [
+        ("题目背景", &["background"][..]),
+        ("题目描述", &["description"]),
+        ("输入格式", &["formatI", "inputFormat"]),
+        ("输出格式", &["formatO", "outputFormat"]),
+        ("说明/提示", &["hint"]),
+    ] {
+        if let Some(text) = field(keys) {
+            out.push_str(&format!(
+                "## {heading}\n\n{}\n\n",
+                inline_html_to_markdown(text)
+            ));
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// Returns `(time_limit_ms, memory_limit_mb)`.
+pub fn luogu_limits(problem: &Value) -> (Option<i64>, Option<i64>) {
+    let max_of = |key: &str| {
+        problem
+            .get("limits")
+            .and_then(|limits| limits.get(key))
+            .and_then(|value| value.as_array())
+            .map(|items| items.iter().filter_map(|item| item.as_i64()).max())
+            .unwrap_or(None)
+            .filter(|value| *value > 0)
+    };
+    let time = max_of("time");
+    // Luogu reports KiB (125000 for "125 MB"); very old exports used MiB.
+    let memory = max_of("memory").map(|kb| if kb >= 1024 { kb / 1024 } else { kb });
+    (time, memory)
+}
+
+/// Maps the numeric tag ids Luogu returns to the names shown in its UI.
+pub fn luogu_tags(problem: &Value, names: &HashMap<i64, String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let Some(tags) = problem.get("tags").and_then(|value| value.as_array()) else {
+        return out;
+    };
+    for tag in tags {
+        let name = tag
+            .get("name")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .or_else(|| tag.as_str().map(str::to_string))
+            .or_else(|| tag.as_i64().and_then(|id| names.get(&id).cloned()))
+            .or_else(|| tag.as_i64().map(|id| format!("tag-{id}")));
+        if let Some(name) = name {
+            if !out.contains(&name) {
+                out.push(name);
+            }
+        }
+    }
+    out
+}
+
+/// `(fetched_at, id → name)`; refreshed hourly.
+type LuoguTagCache = Mutex<Option<(Instant, HashMap<i64, String>)>>;
+
+fn luogu_tag_cache() -> &'static LuoguTagCache {
+    static CACHE: OnceLock<LuoguTagCache> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+async fn luogu_tag_names(app: &AppHandle, automation: &AutomationManager) -> HashMap<i64, String> {
+    const TTL: Duration = Duration::from_secs(3_600);
+    if let Ok(guard) = luogu_tag_cache().lock() {
+        if let Some((at, names)) = guard.as_ref() {
+            if at.elapsed() < TTL {
+                return names.clone();
+            }
+        }
+    }
+    let mut names = HashMap::new();
+    if let Ok(value) = luogu_fetch(app, automation, "/_lfe/tags").await {
+        let data = luogu_data(&value);
+        if let Some(tags) = data.get("tags").and_then(|value| value.as_array()) {
+            for tag in tags {
+                if let (Some(id), Some(name)) = (
+                    tag.get("id").and_then(|value| value.as_i64()),
+                    tag.get("name").and_then(|value| value.as_str()),
+                ) {
+                    names.insert(id, name.to_string());
+                }
+            }
+        }
+    }
+    if !names.is_empty() {
+        if let Ok(mut guard) = luogu_tag_cache().lock() {
+            *guard = Some((Instant::now(), names.clone()));
+        }
+    }
+    names
+}
+
+/// Rewrites every stored `tag-<id>` placeholder to the real tag name.
+///
+/// Luogu tag ids are meaningless in the UI (the dashboard used to render
+/// `tag-45`), and rows written before the id→name mapping existed stay in the
+/// database forever. Skill profile rows are merged by attempts so the Elo does
+/// not get lost when both `tag-45` and `二分` already exist.
+pub async fn tidy_placeholder_tags(db: &Db, names: &HashMap<i64, String>) -> AppResult<usize> {
+    if names.is_empty() {
+        return Ok(0);
+    }
+    let map_tag = |tag: &str| -> Option<String> {
+        tag.strip_prefix("tag-")
+            .and_then(|id| id.parse::<i64>().ok())
+            .and_then(|id| names.get(&id))
+            .cloned()
+    };
+    let mut changed = 0usize;
+    for (table, column) in [
+        ("problems", "tags_json"),
+        ("problems", "skill_tags_json"),
+        ("plan_items", "target_tags_json"),
+    ] {
+        let rows = sqlx::query(&format!(
+            "SELECT rowid AS rid, {column} AS value FROM {table} WHERE {column} LIKE '%tag-%'"
+        ))
+        .fetch_all(&db.pool)
+        .await?;
+        for row in rows {
+            let raw: String = row.get("value");
+            let Ok(tags) = serde_json::from_str::<Vec<String>>(&raw) else {
+                continue;
+            };
+            let mut mapped: Vec<String> = Vec::with_capacity(tags.len());
+            for tag in &tags {
+                let next = map_tag(tag).unwrap_or_else(|| tag.clone());
+                if !mapped.contains(&next) {
+                    mapped.push(next);
+                }
+            }
+            if mapped != tags {
+                changed += tags.iter().filter(|tag| map_tag(tag).is_some()).count();
+                sqlx::query(&format!(
+                    "UPDATE {table} SET {column} = ?1 WHERE rowid = ?2"
+                ))
+                .bind(serde_json::to_string(&mapped).unwrap_or(raw))
+                .bind(row.get::<i64, _>("rid"))
+                .execute(&db.pool)
+                .await?;
+            }
+        }
+    }
+    let rows = sqlx::query(
+        "SELECT tag, rating, attempts, solved FROM skill_profiles WHERE tag LIKE 'tag-%'",
+    )
+    .fetch_all(&db.pool)
+    .await?;
+    for row in rows {
+        let tag: String = row.get("tag");
+        let Some(name) = map_tag(&tag) else {
+            continue;
+        };
+        let rating: f64 = row.get("rating");
+        let attempts: i64 = row.get("attempts");
+        let solved: i64 = row.get("solved");
+        let existing =
+            sqlx::query("SELECT rating, attempts, solved FROM skill_profiles WHERE tag = ?1")
+                .bind(&name)
+                .fetch_optional(&db.pool)
+                .await?;
+        match existing {
+            Some(existing) => {
+                let other_rating: f64 = existing.get("rating");
+                let other_attempts: i64 = existing.get("attempts");
+                let other_solved: i64 = existing.get("solved");
+                let total = (attempts + other_attempts).max(1) as f64;
+                let merged =
+                    (rating * attempts as f64 + other_rating * other_attempts as f64) / total;
+                sqlx::query(
+                    "UPDATE skill_profiles SET rating = ?1, attempts = ?2, solved = ?3, updated_at = ?4 WHERE tag = ?5",
+                )
+                .bind(merged)
+                .bind(attempts + other_attempts)
+                .bind(solved + other_solved)
+                .bind(now_iso())
+                .bind(&name)
+                .execute(&db.pool)
+                .await?;
+            }
+            None => {
+                sqlx::query("UPDATE skill_profiles SET tag = ?1, updated_at = ?2 WHERE tag = ?3")
+                    .bind(&name)
+                    .bind(now_iso())
+                    .bind(&tag)
+                    .execute(&db.pool)
+                    .await?;
+            }
+        }
+        sqlx::query("DELETE FROM skill_profiles WHERE tag = ?1")
+            .bind(&tag)
+            .execute(&db.pool)
+            .await?;
+        changed += 1;
+    }
+    Ok(changed)
+}
+
+/// Runs the placeholder repair once per process. `allow_fetch` controls whether
+/// the Luogu tag dictionary may be fetched through the automation webview: at
+/// startup only the dictionary cached in `luogu.tags` is used, so launching the
+/// app never opens a browser window on its own.
+pub async fn repair_placeholder_tags(
+    app: &AppHandle,
+    automation: &AutomationManager,
+    db: &Db,
+    allow_fetch: bool,
+) {
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if DONE.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let mut names: HashMap<i64, String> = db.get_json("luogu.tags").await.unwrap_or_default();
+    if names.is_empty() && allow_fetch {
+        names = luogu_tag_names(app, automation).await;
+        if !names.is_empty() {
+            let _ = db.set_json("luogu.tags", &names).await;
+        }
+    }
+    if names.is_empty() {
+        return;
+    }
+    match tidy_placeholder_tags(db, &names).await {
+        Ok(0) => {}
+        Ok(count) => tracing::info!("rewrote {count} luogu tag placeholders"),
+        Err(err) => tracing::warn!("tag placeholder repair failed: {}", err.message),
+    }
+    DONE.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// True when the stored statement is really the rendered page (the old
+/// scraper's output) or when the tags still carry raw `tag-<id>` placeholders.
+pub fn luogu_statement_needs_refresh(statement: Option<&str>, tags_json: &str) -> bool {
+    let chrome = ["个人中心", "题目列表", "提交答案", "加入题单", "关于洛谷"];
+    let text = statement.unwrap_or("").trim();
+    if text.is_empty() {
+        return true;
+    }
+    let hits = chrome
+        .iter()
+        .filter(|marker| text.contains(**marker))
+        .count();
+    hits >= 2 || tags_json.contains("\"tag-")
+}
+
 async fn fetch_luogu_statement(
     app: &AppHandle,
     db: &Db,
@@ -1555,32 +1891,33 @@ async fn fetch_luogu_statement(
         .get("problem")
         .cloned()
         .unwrap_or(Value::Null);
-    let statement = problem
-        .get("content")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .or_else(|| {
-            problem
-                .get("translation")
-                .and_then(|v| v.get("content"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        });
-    let statement = match statement {
-        Some(text) if !text.trim().is_empty() => html_to_text(&text),
-        _ => {
-            let js = r#"(() => {
-  const node = document.querySelector('article, .problem-content, .card') || document.body;
-  return JSON.stringify({ text: (node.innerText || '').slice(0, 60000), pres: Array.from(document.querySelectorAll('pre')).map(p => p.innerText).slice(0, 20) });
-})()"#;
-            let fallback = automation.eval_json("luogu", js, 8_000).await?;
-            fallback
-                .get("text")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string()
-        }
+    let names = luogu_tag_names(app, automation).await;
+    // Opening any problem is a cheap moment to persist the tag dictionary and
+    // fix rows written before the id→name mapping existed.
+    repair_placeholder_tags(app, automation, db, true).await;
+
+    let markdown = luogu_statement_markdown(&problem);
+    let statement = if markdown.trim().is_empty() {
+        // Last resort only: a translated problem may expose its body elsewhere.
+        let fallback = automation
+            .eval_json(
+                "luogu",
+                r#"(() => {
+  const node = document.querySelector('.problem-content, article');
+  return JSON.stringify({ text: (node ? node.innerText : '').slice(0, 60000) });
+})()"#,
+                8_000,
+            )
+            .await?;
+        fallback
+            .get("text")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string()
+    } else {
+        markdown
     };
+
     let mut samples = Vec::new();
     if let Some(arr) = problem.get("samples").and_then(|v| v.as_array()) {
         for sample in arr {
@@ -1594,12 +1931,26 @@ async fn fetch_luogu_statement(
             }
         }
     }
+    let tags = luogu_tags(&problem, &names);
+    let skill_tags = skill_tags_for("luogu", &tags);
+    let (time_limit_ms, memory_limit_mb) = luogu_limits(&problem);
     let difficulty = problem.get("difficulty").and_then(|v| v.as_i64());
     sqlx::query(
-        "UPDATE problems SET statement_md = ?1, samples_json = ?2, normalized_rating = COALESCE(?3, normalized_rating), rating = COALESCE(?4, rating), fetched_at = ?5, content_hash = ?6 WHERE id = ?7",
+        "UPDATE problems SET statement_md = ?1, samples_json = ?2,
+            tags_json = ?3, skill_tags_json = ?4,
+            time_limit_ms = COALESCE(?5, time_limit_ms),
+            memory_limit_mb = COALESCE(?6, memory_limit_mb),
+            normalized_rating = COALESCE(?7, normalized_rating),
+            rating = COALESCE(?8, rating),
+            fetched_at = ?9, content_hash = ?10
+         WHERE id = ?11",
     )
     .bind(&statement)
     .bind(serde_json::to_string(&samples).unwrap_or_else(|_| "[]".into()))
+    .bind(serde_json::to_string(&tags).unwrap_or_else(|_| "[]".into()))
+    .bind(serde_json::to_string(&skill_tags).unwrap_or_else(|_| "[]".into()))
+    .bind(time_limit_ms)
+    .bind(memory_limit_mb)
     .bind(luogu_normalized(difficulty))
     .bind(difficulty)
     .bind(now_iso())
@@ -1837,5 +2188,189 @@ mod tests {
         let problems = luogu_problem_items(&value);
         assert_eq!(problems.len(), 1);
         assert_eq!(problems[0]["name"], "A+B Problem");
+    }
+
+    /// Shape of `GET /problem/P1111?_contentOnly=1`, as used by Luogu's own SPA.
+    fn luogu_problem_fixture() -> Value {
+        json!({
+            "currentData": {
+                "problem": {
+                    "pid": "P1111",
+                    "content": {
+                        "name": "修复公路",
+                        "background": "A 地区在地震过后，连接所有村庄的公路都造成了损坏。",
+                        "description": "给出村庄数 $N$，和公路数 $M$。",
+                        "formatI": "第 $1$ 行两个正整数 $N,M$。",
+                        "formatO": "输出最早什么时候任意两个村庄能够通车。",
+                        "hint": "$1\\leq x, y\\leq N \\le 10 ^ 3$。<br>提示结束",
+                        "locale": "zh-CN"
+                    },
+                    "samples": [["4 4\n1 2 6\n", "5\n"]],
+                    "limits": { "time": [1000], "memory": [128000] },
+                    "tags": [45, 47],
+                    "difficulty": 3
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn composes_luogu_statement_from_markdown_fields() {
+        let value = luogu_problem_fixture();
+        let problem = luogu_data(&value).get("problem").cloned().unwrap();
+        let markdown = luogu_statement_markdown(&problem);
+        assert!(markdown.starts_with("## 题目背景"));
+        for heading in ["## 题目描述", "## 输入格式", "## 输出格式", "## 说明/提示"]
+        {
+            assert!(markdown.contains(heading), "missing {heading}");
+        }
+        // Formulas are preserved verbatim for remark-math/KaTeX.
+        assert!(markdown.contains("$N$"));
+        assert!(markdown.contains("$1\\leq x, y\\leq N \\le 10 ^ 3$"));
+        // The page chrome must never leak into the statement.
+        assert!(!markdown.contains("个人中心"));
+        assert!(!markdown.contains("提交答案"));
+        // `<br>` becomes a real line break instead of raw HTML.
+        assert!(!markdown.contains("<br>"));
+    }
+
+    #[test]
+    fn skips_empty_luogu_sections() {
+        let problem = json!({ "description": "只有描述", "inputFormat": "  ", "hint": null });
+        let markdown = luogu_statement_markdown(&problem);
+        assert_eq!(markdown, "## 题目描述\n\n只有描述");
+        // Legacy top-level `inputFormat`/`outputFormat` still works.
+        let legacy = json!({
+            "description": "$N$",
+            "inputFormat": "输入",
+            "outputFormat": "输出"
+        });
+        let markdown = luogu_statement_markdown(&legacy);
+        assert!(markdown.contains("## 输入格式\n\n输入"));
+        assert!(markdown.contains("## 输出格式\n\n输出"));
+    }
+
+    #[test]
+    fn converts_inline_images_to_markdown() {
+        assert_eq!(
+            inline_html_to_markdown(r#"<img src="https://cdn/a.png" />"#),
+            "![](https://cdn/a.png)"
+        );
+        assert_eq!(inline_html_to_markdown("a<br/>b"), "a\nb");
+    }
+
+    #[test]
+    fn converts_luogu_limits_to_ms_and_mb() {
+        let value = luogu_problem_fixture();
+        let problem = luogu_data(&value).get("problem").cloned().unwrap();
+        assert_eq!(luogu_limits(&problem), (Some(1000), Some(125)));
+        assert_eq!(luogu_limits(&json!({})), (None, None));
+    }
+
+    #[tokio::test]
+    async fn rewrites_placeholder_tags_and_merges_skill_profiles() {
+        let dir = std::env::temp_dir().join(format!("icpc-tags-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let db = Db::open(&dir.join("test.db")).await.expect("db");
+        sqlx::query(
+            "INSERT INTO problems(id, platform, native_id, title, url, normalized_rating, tags_json, skill_tags_json, samples_json)
+             VALUES('luogu:P1', 'luogu', 'P1', '测试', 'https://example.com', 1500, '[\"tag-45\",\"二分\"]', '[\"tag-45\"]', '[]')",
+        )
+        .execute(&db.pool)
+        .await
+        .expect("insert problem");
+        sqlx::query(
+            "INSERT INTO plan_items(id, plan_id, problem_id, target_tags_json) VALUES('i1', 'p1', 'luogu:P1', '[\"tag-45\"]')",
+        )
+        .execute(&db.pool)
+        .await
+        .expect("insert item");
+        for (tag, rating, attempts, solved) in [("tag-45", 1200.0, 2, 1), ("二分", 1400.0, 2, 2)]
+        {
+            sqlx::query(
+                "INSERT INTO skill_profiles(tag, rating, attempts, solved, last_delta, updated_at)
+                 VALUES(?1, ?2, ?3, ?4, 0, 'now')",
+            )
+            .bind(tag)
+            .bind(rating)
+            .bind(attempts)
+            .bind(solved)
+            .execute(&db.pool)
+            .await
+            .expect("insert skill");
+        }
+
+        let names: HashMap<i64, String> = [(45i64, "二分".to_string())].into_iter().collect();
+        let changed = tidy_placeholder_tags(&db, &names).await.expect("tidy");
+        assert!(
+            changed >= 3,
+            "problem, plan item and skill row are rewritten"
+        );
+
+        let tags: String = sqlx::query("SELECT tags_json FROM problems WHERE id='luogu:P1'")
+            .fetch_one(&db.pool)
+            .await
+            .expect("problem")
+            .get("tags_json");
+        assert_eq!(tags, "[\"二分\"]");
+        let plan_tags: String =
+            sqlx::query("SELECT target_tags_json FROM plan_items WHERE id='i1'")
+                .fetch_one(&db.pool)
+                .await
+                .expect("item")
+                .get("target_tags_json");
+        assert_eq!(plan_tags, "[\"二分\"]");
+
+        // The Elo of both rows is merged by attempts: (1200*2 + 1400*2) / 4.
+        let rows = sqlx::query("SELECT tag, rating, attempts, solved FROM skill_profiles")
+            .fetch_all(&db.pool)
+            .await
+            .expect("skills");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get::<String, _>("tag"), "二分");
+        assert_eq!(rows[0].get::<i64, _>("attempts"), 4);
+        assert_eq!(rows[0].get::<i64, _>("solved"), 3);
+        assert!((rows[0].get::<f64, _>("rating") - 1300.0).abs() < 0.01);
+
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keeps_cjk_skill_tags() {
+        assert_eq!(
+            skill_tags_for(
+                "luogu",
+                &["并查集".to_string(), "Data Structures".to_string()]
+            ),
+            vec!["并查集", "data-structures"]
+        );
+    }
+
+    #[test]
+    fn maps_luogu_tag_ids_to_names() {
+        let problem = json!({ "tags": [45, 47, 999] });
+        let names: HashMap<i64, String> = [(45, "并查集".to_string()), (47, "图论".to_string())]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            luogu_tags(&problem, &names),
+            vec!["并查集", "图论", "tag-999"]
+        );
+    }
+
+    #[test]
+    fn detects_page_chrome_and_placeholder_tags() {
+        let statement = "题目列表/P1111 个人中心 用户设置 提交答案 加入题单";
+        assert!(luogu_statement_needs_refresh(Some(statement), "[]"));
+        assert!(luogu_statement_needs_refresh(None, "[]"));
+        assert!(luogu_statement_needs_refresh(
+            Some("## 题目描述"),
+            r#"["tag-45"]"#
+        ));
+        assert!(!luogu_statement_needs_refresh(
+            Some("## 题目描述\n\n给出 $N$"),
+            r#"["并查集"]"#
+        ));
     }
 }

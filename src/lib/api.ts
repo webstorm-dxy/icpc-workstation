@@ -14,11 +14,16 @@ import type {
   Dashboard,
   Draft,
   JudgeResult,
+  LspExitEvent,
+  LspMessageEvent,
+  LspServer,
+  LspSession,
   ModelInfo,
   OnboardingState,
   Plan,
   PlanAgentEvent,
   Platform,
+  PlatformQuota,
   PlatformLoginResult,
   Problem,
   Provider,
@@ -100,7 +105,8 @@ export const api = {
   getDashboard: () => invoke<Dashboard>("get_dashboard"),
 
   // problems / judge
-  getProblem: (problemId: string) => invoke<Problem>("get_problem", { problemId }),
+  getProblem: (problemId: string, refresh = false) =>
+    invoke<Problem>("get_problem", { problemId, refresh }),
   getDraft: (problemId: string) => invoke<Draft | null>("get_draft", { problemId }),
   saveDraft: (problemId: string, code: string, language = "cpp") =>
     invoke<void>("save_draft", { problemId, code, language }),
@@ -113,12 +119,24 @@ export const api = {
   }) => invoke<JudgeResult>("run_samples", { req }),
   detectToolchains: () => invoke<Toolchain[]>("detect_toolchains"),
 
+  // language server (LSP)
+  detectLspServers: (refresh = false) => invoke<LspServer[]>("detect_lsp_servers", { refresh }),
+  startLspSession: (input: {
+    problemId: string;
+    standard: string;
+    serverPath?: string | null;
+  }) => invoke<LspSession>("start_lsp_session", { input }),
+  sendLspMessage: (sessionId: string, message: string) =>
+    invoke<void>("send_lsp_message", { sessionId, message }),
+  stopLspSession: (sessionId: string) => invoke<boolean>("stop_lsp_session", { sessionId }),
+
   // plans
   generatePlan: (req: {
     reason?: string;
     focusTags?: string[];
     count?: number;
-    platforms?: string[];
+    /** Per-OJ counts; empty/omitted lets the agent pick across platforms. */
+    platforms?: PlatformQuota[];
   }) => invoke<Plan>("generate_plan", { req }),
   getActivePlan: () => invoke<Plan | null>("get_active_plan"),
   setPlanItemStatus: (itemId: string, status: string) =>
@@ -229,6 +247,10 @@ export const events = {
     listen<{ message: string; code?: string; trigger?: string }>("plan://error", (e) => cb(e.payload)),
   onSubmissionUpdated: (cb: (e: { id: string }) => void): Promise<UnlistenFn> =>
     listen<{ id: string }>("submission://updated", (e) => cb(e.payload)),
+  onLspMessage: (cb: (e: LspMessageEvent) => void): Promise<UnlistenFn> =>
+    listen<LspMessageEvent>("lsp://message", (e) => cb(e.payload)),
+  onLspExit: (cb: (e: LspExitEvent) => void): Promise<UnlistenFn> =>
+    listen<LspExitEvent>("lsp://exit", (e) => cb(e.payload)),
 };
 
 export type { Sample };

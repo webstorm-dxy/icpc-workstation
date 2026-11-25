@@ -1,7 +1,7 @@
 #AOCI-ROOT-MANIFEST: 1
 #Format-Version: cognition-volumes/v1
 #Locale: zh-CN
-#Project: ICPCWorkstation
-#Global-Invariants: -
+#Project: ICPC 备赛工作站：Tauri 2 桌面应用（React 19 + antd 6 前端、Rust 后端），用内嵌子 WebView 驱动 Codeforces/AtCoder/洛谷 的同步与真实提交，配合本地 C++ 判题、clangd 语言服务、LLM Agent 训练计划与提交后分析，数据全部落在本机 SQLite。
+#Global-Invariants: OJ 子 WebView 不获得 Tauri IPC，页面数据只经 eval_with_callback 读取；API Key 只存系统钥匙串，日志与 UI 不得出现明文密钥或 Cookie；真实 OJ 提交必须用户显式确认，Agent 工具固定 auto_submit=false；模型供应商差异只允许出现在 provider.rs 与 llm.rs；开发数据目录用 ICPC_DATA_DIR（默认 .appdata），.appdata、缓存与密钥不得提交；仓库文本一律 LF。
 #Volume: id=meta kind=meta path=aoci.meta.txt format=meta-v1 depends=- state=enabled
 #Volume: id=code kind=code path=aoci.code.txt format=object-fras-v2 depends=meta state=enabled

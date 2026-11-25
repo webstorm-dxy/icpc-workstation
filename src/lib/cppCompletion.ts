@@ -1,5 +1,13 @@
 import type { Completion, CompletionContext, CompletionResult, CompletionSource } from "@codemirror/autocomplete";
 
+/** One indent level for the C++ editor.
+ *
+ * The starter template, every snippet below and the editor's `indentUnit` share
+ * this width; CodeMirror's two-space default used to make Tab-typed code drift
+ * away from the template that was just inserted.
+ */
+export const EDITOR_INDENT = "    ";
+
 const KEYWORDS = [
   "alignas", "alignof", "and", "asm", "auto", "bool", "break", "case", "catch",
   "char", "class", "const", "constexpr", "const_cast", "continue", "decltype",

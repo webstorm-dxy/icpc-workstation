@@ -30,10 +30,31 @@ Tauri App (Rust)
 | `automation.rs` | 子 webview 生命周期、eval/等待/轮询、状态事件 |
 | `submission.rs` | 填表/点击/判定轮询/人工兜底/手动录入 |
 | `judge.rs` | 工具链探测、编译、样例执行、超时/输出限制、diff |
+| `lsp.rs` | clangd 探测与进程生命周期、LSP over stdio 分帧、JSON-RPC 中继、工作区与编译旗标 |
 | `analysis.rs` | 提交后结构化分析、确定性兜底、标签 Elo、恢复待分析任务 |
 | `plan.rs` | 候选池、LLM 推荐、约束校验、确定性兜底、计划刷新 |
 | `reports.rs` | 数据聚合、报告生成、模板兜底、导出数据 |
 | `commands.rs` | Tauri 命令、事件、演示数据 |
+
+## 代码编辑器与 LSP
+
+题目页的 C++ 编辑器是 CodeMirror 6，语言能力由 clangd 提供：
+
+```
+webview (src/lib/lsp.ts)                     Rust (src-tauri/src/lsp.rs)
+LanguageServerClient ── invoke send_lsp_message ──▶ 写 clangd stdin
+        ▲                                          clangd (per problem+dialect)
+        └──── event lsp://message ◀────────────── 读 clangd stdout
+```
+
+- 传输不走 WebSocket：CSP 只允许 `'self'`，且不额外开本地端口；JSON-RPC 帧由 Tauri IPC 搬运。`send` 在前端串行排队，否则 `didOpen` 可能晚于 `didChange` 到达。
+- 每个「题目 + `-std` + 服务器路径」对应一个 clangd 进程，由前端缓存复用（React StrictMode 双挂载、页面来回切换不会反复起进程）；超过 2 个时按最近使用淘汰，应用退出时 `RunEvent::Exit` 统一回收。
+- Rust 只做三件事：探测服务器、准备 `<数据目录>/lsp/<problem>/`（`main.cpp`、`compile_flags.txt`、`bits/stdc++.h` 兼容层）、分帧转发。协议状态机全在 `src/lib/lsp.ts`。
+- `compile_flags.txt` 固定为 `-x c++ / -std=<方言> / -I<工作区>`：`-I` 让 `#include <bits/stdc++.h>` 命中兼容层，与本机判题的行为一致（macOS 的 clang 没有 libstdc++ 的 bits 目录）。
+- 补全来源合并：本地精选片段/关键字（`cppCompletion`）与 clangd 语义补全在同一次查询里合并，按 label 去重，`filter: false` 交给服务端排序；两边的替换区间可能不同，本地项因此被固定在自己的区间上。
+- 依赖包自带的 `languageServerWithTransport()` 未被使用：它会自带 `autocompletion({ override })`，与本地的 override 冲突（facet 合并会抛错）。
+- clangd 不传 `--stdio`（stdio 是默认传输，clangd 没有该开关），并关闭 background index。
+- 语言服务器不可用时编辑器自动退回纯本地补全；工具栏标签可切换服务器、重启或关闭。
 
 ## 数据
 
@@ -87,6 +108,7 @@ Opening → VerifyingSession → Filling → (PreSubmitConfirm) → Clicking
 ```
 
 - 平台/提交串行；冷却（CF/洛谷 60s，AtCoder 300s）；相同代码 10 分钟内拒绝。
+- 洛谷自动提交不走 DOM：在已登录页面里 `POST /fe/api/problem/submit/{pid}`（带 CSRF 和 `{code, lang, enableO2}`），拿到 `rid` 后轮询 `/record/{rid}`；填表流程只用于“等用户确认再提交”的场景。
 - 检测验证码/登录页/403：设置 `NeedsHuman`，显示页面，等待用户“验证登录/继续”后由用户重试或调用 `capture_verdict`。
 - 点击后不盲目重试；若拿不到判定，保留“读取结果”和“手动录入”。
 

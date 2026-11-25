@@ -61,6 +61,8 @@ export interface Settings {
   autoRefreshPlan: boolean;
   reportDir?: string | null;
   mockMode: boolean;
+  lspEnabled: boolean;
+  lspServerPath?: string | null;
 }
 
 export interface AccountCard {
@@ -409,4 +411,35 @@ export interface AppInfo {
   version: string;
   dataDir: string;
   model: string;
+}
+
+export interface PlatformQuota {
+  platform: string;
+  count: number;
+}
+
+export interface LspServer {
+  path: string;
+  name: string;
+  version?: string | null;
+  source: string;
+}
+
+export interface LspSession {
+  sessionId: string;
+  server: string;
+  serverVersion?: string | null;
+  rootUri: string;
+  documentUri: string;
+  workspace: string;
+  languageId: string;
+}
+
+export interface LspMessageEvent {
+  sessionId: string;
+  message: string;
+}
+
+export interface LspExitEvent {
+  sessionId: string;
 }

@@ -201,6 +201,12 @@ pub async fn update_settings(
     if let Some(v) = patch.mock_mode {
         settings.mock_mode = v;
     }
+    if let Some(v) = patch.lsp_enabled {
+        settings.lsp_enabled = v;
+    }
+    if let Some(v) = patch.lsp_server_path {
+        settings.lsp_server_path = v.filter(|s| !s.trim().is_empty());
+    }
     state.db.set_json("settings", &settings).await?;
     Ok(settings)
 }
@@ -845,8 +851,18 @@ pub async fn get_problem(
     app: AppHandle,
     state: State<'_, SharedState>,
     problem_id: String,
+    refresh: Option<bool>,
 ) -> AppResult<ProblemDto> {
-    platforms::fetch_problem(&app, &state.db, &state.automation, &problem_id).await
+    // `refresh` backs the "重新获取" button: it re-parses the statement even
+    // when one is already stored.
+    platforms::fetch_problem(
+        &app,
+        &state.db,
+        &state.automation,
+        &problem_id,
+        refresh.unwrap_or(false),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -886,6 +902,59 @@ pub async fn run_samples(
 #[tauri::command]
 pub async fn detect_toolchains() -> AppResult<Vec<ToolchainDto>> {
     Ok(judge::detect_toolchains().await)
+}
+
+// ---------------------------------------------------------------------------
+// Language server (LSP)
+//
+// The protocol itself lives in the webview (`src/lib/lsp.ts`); these commands
+// only move JSON-RPC payloads across the process boundary, so every one of
+// them is a thin, ordered adapter over `LspManager`.
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn detect_lsp_servers(
+    state: State<'_, SharedState>,
+    refresh: Option<bool>,
+) -> AppResult<Vec<LspServerDto>> {
+    let shared = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        shared.lsp.detect_servers(refresh.unwrap_or(false))
+    })
+    .await
+    .map_err(AppError::internal)
+}
+
+#[tauri::command]
+pub async fn start_lsp_session(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    input: StartLspInput,
+) -> AppResult<LspSessionDto> {
+    let shared = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || shared.lsp.start(&app, &shared.data_dir, input))
+        .await
+        .map_err(AppError::internal)?
+}
+
+#[tauri::command]
+pub fn send_lsp_message(
+    state: State<'_, SharedState>,
+    session_id: String,
+    message: String,
+) -> AppResult<()> {
+    state.lsp.send(&session_id, &message)
+}
+
+#[tauri::command]
+pub async fn stop_lsp_session(
+    state: State<'_, SharedState>,
+    session_id: String,
+) -> AppResult<bool> {
+    let shared = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || shared.lsp.stop(&session_id))
+        .await
+        .map_err(AppError::internal)
 }
 
 // ---------------------------------------------------------------------------

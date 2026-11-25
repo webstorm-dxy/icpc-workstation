@@ -338,22 +338,87 @@ impl AutomationManager {
             }})()"#
         );
         self.eval_json(platform, &start, 5_000).await?;
-        let poll = "(() => { const r = window.__icpcResult; return r === null || r === undefined ? 'null' : JSON.stringify(r); })()";
+        self.poll_page_global(
+            platform,
+            "__icpcResult",
+            timeout_ms,
+            "等待洛谷数据超时，可能需要完成人机验证",
+        )
+        .await
+    }
+
+    /// Issues a same-origin JSON POST from inside the OJ page.
+    ///
+    /// Code must be sent by the page itself: only it carries the session cookies
+    /// and the `csrf-token` meta value the platform checks on writes. The result
+    /// is parked on `window.__icpcPost` and polled, because `eval_with_callback`
+    /// cannot await a promise.
+    pub async fn post_json_in_page(
+        &self,
+        platform: &str,
+        path: &str,
+        body: &str,
+        timeout_ms: u64,
+    ) -> AppResult<Value> {
+        let path_json = serde_json::to_string(path).map_err(AppError::internal)?;
+        let body_json = serde_json::to_string(body).map_err(AppError::internal)?;
+        let start = format!(
+            r#"(() => {{
+                window.__icpcPost = null;
+                const meta = document.querySelector('meta[name="csrf-token"]');
+                const csrf = meta ? meta.getAttribute('content') || '' : '';
+                fetch({path_json}, {{
+                    method: 'POST',
+                    credentials: 'include',
+                    headers: {{
+                        'content-type': 'application/json',
+                        'accept': 'application/json',
+                        'x-requested-with': 'XMLHttpRequest',
+                        'x-csrf-token': csrf
+                    }},
+                    body: {body_json}
+                }})
+                  .then(async (r) => {{
+                    const text = await r.text();
+                    let parsed;
+                    try {{ parsed = JSON.parse(text); }} catch (_) {{ parsed = {{ __raw: text.slice(0, 4000) }}; }}
+                    window.__icpcPost = {{ status: r.status, redirected: r.redirected, body: parsed }};
+                  }})
+                  .catch((e) => {{ window.__icpcPost = {{ status: 0, error: String(e) }}; }});
+                return JSON.stringify({{ started: true }});
+            }})()"#
+        );
+        self.eval_json(platform, &start, 5_000).await?;
+        self.poll_page_global(
+            platform,
+            "__icpcPost",
+            timeout_ms,
+            "等待提交响应超时，请检查页面是否需要验证",
+        )
+        .await
+    }
+
+    async fn poll_page_global(
+        &self,
+        platform: &str,
+        global: &str,
+        timeout_ms: u64,
+        timeout_message: &str,
+    ) -> AppResult<Value> {
+        let poll = format!(
+            "(() => {{ const r = window.{global}; return r === null || r === undefined ? 'null' : JSON.stringify(r); }})()"
+        );
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
         loop {
-            match self.eval_json(platform, poll, 5_000).await {
+            match self.eval_json(platform, &poll, 5_000).await {
                 Ok(Value::Null) => {}
                 Ok(value) => return Ok(value),
                 Err(_) => {}
             }
             if tokio::time::Instant::now() >= deadline {
-                return Err(AppError::new(
-                    "E_AUTOMATION_TIMEOUT",
-                    "等待洛谷数据超时，可能需要完成人机验证",
-                )
-                .retryable());
+                return Err(AppError::new("E_AUTOMATION_TIMEOUT", timeout_message).retryable());
             }
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         }
     }
 

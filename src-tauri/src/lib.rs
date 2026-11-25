@@ -6,6 +6,7 @@ mod db;
 mod error;
 mod judge;
 mod llm;
+mod lsp;
 mod models;
 mod plan;
 mod platforms;
@@ -17,6 +18,7 @@ mod submission;
 mod util;
 
 use tauri::Manager;
+use tauri::RunEvent;
 
 pub fn run() {
     tauri::Builder::default()
@@ -38,12 +40,25 @@ pub fn run() {
             }
             let state_for_resume = state.clone();
             let app_for_resume = app.handle().clone();
+            let state_for_tags = state.clone();
+            let app_for_tags = app.handle().clone();
             app.manage(state);
             tauri::async_runtime::spawn(async move {
                 analysis::resume_pending(
                     &app_for_resume,
                     &state_for_resume.db,
                     &state_for_resume.llm,
+                )
+                .await;
+            });
+            // Uses only the dictionary cached in `luogu.tags`, so no browser
+            // window is opened during launch.
+            tauri::async_runtime::spawn(async move {
+                platforms::repair_placeholder_tags(
+                    &app_for_tags,
+                    &state_for_tags.automation,
+                    &state_for_tags.db,
+                    false,
                 )
                 .await;
             });
@@ -118,6 +133,10 @@ pub fn run() {
             commands::save_draft,
             commands::run_samples,
             commands::detect_toolchains,
+            commands::detect_lsp_servers,
+            commands::start_lsp_session,
+            commands::send_lsp_message,
+            commands::stop_lsp_session,
             commands::generate_plan,
             commands::get_active_plan,
             commands::set_plan_item_status,
@@ -145,6 +164,16 @@ pub fn run() {
             commands::confirm_tool,
             commands::seed_demo_data,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // Language server children do not belong to the webview lifetime,
+            // so they are reaped explicitly instead of being left to inherit
+            // the app's death.
+            if matches!(event, RunEvent::Exit) {
+                if let Some(state) = app.try_state::<state::SharedState>() {
+                    state.lsp.stop_all();
+                }
+            }
+        });
 }

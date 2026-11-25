@@ -3,6 +3,7 @@ use crate::automation::AutomationManager;
 use crate::db::Db;
 use crate::error::AppResult;
 use crate::llm::LlmClient;
+use crate::lsp::LspManager;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -14,6 +15,7 @@ pub struct AppState {
     pub llm: LlmClient,
     pub automation: AutomationManager,
     pub agent: AgentService,
+    pub lsp: LspManager,
     pub print_report_id: Mutex<Option<String>>,
     pub syncing: Mutex<HashSet<String>>,
     pub data_dir: PathBuf,
@@ -39,6 +41,7 @@ pub async fn init(app: &tauri::AppHandle) -> AppResult<SharedState> {
         llm: LlmClient::new(),
         automation: AutomationManager::default(),
         agent: AgentService::default(),
+        lsp: LspManager::default(),
         print_report_id: Mutex::new(None),
         syncing: Mutex::new(HashSet::new()),
         data_dir,
