@@ -1,5 +1,8 @@
 # ICPC 备赛工作站
 
+[![CI](https://github.com/webstorm-dxy/icpc-workstation/actions/workflows/ci.yml/badge.svg)](https://github.com/webstorm-dxy/icpc-workstation/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 一个本地优先的 ICPC 训练工作台：**主页就是内置 ICPC Agent 的对话框**。它把 OJ 登录/同步、训练数据面板、Agent 推荐题目、C++ 编辑器、样例测试、浏览器自动化提交、提交后代码分析、训练计划刷新和个人报告导出串成一个闭环。
 
 > 平台：macOS（完整验证）。代码保持跨平台，Windows/Linux 未做运行时 QA。
@@ -121,3 +124,16 @@ src-tauri/prompts/   Agent 提示词
 docs/                架构、OJ 适配器、Agent、计划与进度
 ```
 
+## 参与
+
+欢迎 Issue 与 Pull Request。提交前请先跑通 `./scripts/check.sh`（前端 typecheck/test + Rust fmt/clippy/test），CI 会执行同样的检查。
+
+请注意：
+
+- 不要提交 API Key、OJ Cookie、`.appdata/`、`.cargo-home/`、`.pnpm-store/`。
+- 密钥只进系统钥匙串，日志中不得出现 Authorization / Cookie 值。
+- 涉及真实 OJ 提交的自动化需要用户显式确认，不要加入会自动向 OJ 提交的测试。
+
+## 许可证
+
+[MIT](LICENSE) © 2026 webstorm-dxy
